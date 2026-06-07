@@ -1,0 +1,112 @@
+name: Deploy backend
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: true
+
+env:
+  APP_DIR: /www/wwwroot/gljava
+  APP_NAME: ruoyi-admin
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Build jar
+        run: mvn -B -DskipTests clean package
+
+      - name: Upload jar
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          source: ruoyi-admin/target/ruoyi-admin.jar
+          target: /tmp
+          strip_components: 2
+          overwrite: true
+
+      - name: Restart backend
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          port: ${{ secrets.SERVER_PORT || '22' }}
+          script_stop: true
+          script: |
+            set -e
+
+            APP_DIR="${{ env.APP_DIR }}"
+            APP_NAME="${{ env.APP_NAME }}"
+            APP_JAR="$APP_DIR/$APP_NAME.jar"
+            NEW_JAR="/tmp/$APP_NAME.jar"
+            BACKUP_DIR="$APP_DIR/backup"
+            LOG_DIR="$APP_DIR/logs"
+
+            mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR"
+
+            if [ ! -f "$NEW_JAR" ]; then
+              echo "Uploaded jar not found: $NEW_JAR"
+              exit 1
+            fi
+
+            if [ -f "$APP_JAR" ]; then
+              cp "$APP_JAR" "$BACKUP_DIR/$APP_NAME-$(date +%Y%m%d%H%M%S).jar"
+            fi
+
+            mv "$NEW_JAR" "$APP_JAR"
+            chmod 755 "$APP_JAR"
+
+            if command -v systemctl >/dev/null 2>&1; then
+              JAVA_BIN="$(command -v java || true)"
+              if [ -z "$JAVA_BIN" ]; then
+                echo "java command not found on server"
+                exit 1
+              fi
+
+              cat >/etc/systemd/system/$APP_NAME.service <<EOF
+            [Unit]
+            Description=RuoYi backend service
+            After=network.target
+
+            [Service]
+            Type=simple
+            WorkingDirectory=$APP_DIR
+            ExecStart=/bin/sh -lc 'exec $JAVA_BIN -jar $APP_JAR >> $LOG_DIR/$APP_NAME.log 2>> $LOG_DIR/$APP_NAME.err.log'
+            Restart=always
+            RestartSec=5
+            SuccessExitStatus=143
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+              systemctl daemon-reload
+              systemctl enable "$APP_NAME"
+              systemctl restart "$APP_NAME"
+              systemctl --no-pager --full status "$APP_NAME"
+            else
+              pkill -f "$APP_NAME.jar" || true
+              nohup java -jar "$APP_JAR" > "$LOG_DIR/$APP_NAME.log" 2> "$LOG_DIR/$APP_NAME.err.log" &
+              sleep 5
+              pgrep -f "$APP_NAME.jar"
+            fi
