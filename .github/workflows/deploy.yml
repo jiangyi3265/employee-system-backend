@@ -13,6 +13,7 @@ concurrency:
 env:
   APP_DIR: /www/wwwroot/gljava
   APP_NAME: ruoyi-admin
+  APP_PORT: 9090
 
 jobs:
   deploy:
@@ -57,10 +58,15 @@ jobs:
 
             APP_DIR="${{ env.APP_DIR }}"
             APP_NAME="${{ env.APP_NAME }}"
+            APP_PORT="${{ env.APP_PORT }}"
+            DB_USERNAME="${{ secrets.DB_USERNAME }}"
+            DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
             APP_JAR="$APP_DIR/$APP_NAME.jar"
             NEW_JAR="/tmp/$APP_NAME.jar"
             BACKUP_DIR="$APP_DIR/backup"
             LOG_DIR="$APP_DIR/logs"
+            : "${DB_USERNAME:=ha}"
+            : "${DB_PASSWORD:=123456}"
 
             mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR"
 
@@ -91,7 +97,7 @@ jobs:
             [Service]
             Type=simple
             WorkingDirectory=$APP_DIR
-            ExecStart=/bin/sh -lc 'exec $JAVA_BIN -jar $APP_JAR >> $LOG_DIR/$APP_NAME.log 2>> $LOG_DIR/$APP_NAME.err.log'
+            ExecStart=/bin/sh -lc 'exec $JAVA_BIN -jar $APP_JAR --server.port=$APP_PORT --spring.datasource.druid.master.username=$DB_USERNAME --spring.datasource.druid.master.password=$DB_PASSWORD >> $LOG_DIR/$APP_NAME.log 2>> $LOG_DIR/$APP_NAME.err.log'
             Restart=always
             RestartSec=5
             SuccessExitStatus=143
