@@ -82,10 +82,11 @@ jobs:
             fi
 
             for path in "$BUILD_NEW" "$BUILD_PREV"; do
-              case "$path" in
-                "$APP_DIR"/*) rm -rf "$path" ;;
-                *) echo "Refusing to delete unexpected path: $path"; exit 1 ;;
-              esac
+              if [[ "$path" != "$APP_DIR"/* ]]; then
+                echo "Refusing to delete unexpected path: $path"
+                exit 1
+              fi
+              rm -rf "$path"
             done
 
             mkdir -p "$BUILD_NEW"
