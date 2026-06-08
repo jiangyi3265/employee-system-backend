@@ -64,8 +64,8 @@ public class SqmsRecordController implements InitializingBean
                 "table_name VARCHAR(64) NOT NULL," +
                 "record_id VARCHAR(80) NOT NULL," +
                 "record_json LONGTEXT NOT NULL," +
-                "create_time DATETIME DEFAULT CURRENT_TIMESTAMP," +
-                "update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                "create_time DATETIME DEFAULT NULL," +
+                "update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
                 "PRIMARY KEY (id)," +
                 "UNIQUE KEY uk_sqms_record (table_name, record_id)," +
                 "KEY idx_sqms_record_table (table_name)" +

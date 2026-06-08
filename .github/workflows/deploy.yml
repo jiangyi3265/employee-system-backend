@@ -65,10 +65,11 @@ jobs:
             NEW_JAR="/tmp/$APP_NAME.jar"
             BACKUP_DIR="$APP_DIR/backup"
             LOG_DIR="$APP_DIR/logs"
+            UPLOAD_DIR="/www/wwwroot/uploadPath"
             : "${DB_USERNAME:=ha}"
             : "${DB_PASSWORD:=123456}"
 
-            mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR"
+            mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR" "$UPLOAD_DIR"
 
             if [ ! -f "$NEW_JAR" ]; then
               echo "Uploaded jar not found: $NEW_JAR"
@@ -97,7 +98,7 @@ jobs:
             [Service]
             Type=simple
             WorkingDirectory=$APP_DIR
-            ExecStart=/bin/sh -lc 'exec $JAVA_BIN -jar $APP_JAR --server.port=$APP_PORT --spring.datasource.druid.master.username=$DB_USERNAME --spring.datasource.druid.master.password=$DB_PASSWORD >> $LOG_DIR/$APP_NAME.log 2>> $LOG_DIR/$APP_NAME.err.log'
+            ExecStart=/bin/sh -lc 'exec $JAVA_BIN -jar $APP_JAR --server.port=$APP_PORT --ruoyi.profile=$UPLOAD_DIR --spring.datasource.druid.master.username=$DB_USERNAME --spring.datasource.druid.master.password=$DB_PASSWORD >> $LOG_DIR/$APP_NAME.log 2>> $LOG_DIR/$APP_NAME.err.log'
             Restart=always
             RestartSec=5
             SuccessExitStatus=143
