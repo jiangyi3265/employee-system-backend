@@ -23,20 +23,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '8'
-          cache: maven
-
-      - name: Build jar
-        run: mvn -B -DskipTests clean package
+      - name: Package source
+        run: git archive --format=tar.gz --output="/tmp/$APP_NAME-src.tar.gz" HEAD
 
       - name: Install SSH tools
         run: sudo apt-get update && sudo apt-get install -y sshpass
 
-      - name: Upload jar
+      - name: Upload source
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
@@ -50,16 +43,17 @@ jobs:
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -P "${SERVER_PORT:-22}" \
-            ruoyi-admin/target/ruoyi-admin.jar \
-            "$SERVER_USER@$SERVER_HOST:/tmp/$APP_NAME.jar"
+            "/tmp/$APP_NAME-src.tar.gz" \
+            "$SERVER_USER@$SERVER_HOST:/tmp/$APP_NAME-src.tar.gz"
 
-      - name: Restart backend
+      - name: Build and restart backend
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT || '22' }}
+          command_timeout: 20m
           script_stop: true
           script: |
             set -e
@@ -70,7 +64,10 @@ jobs:
             DB_USERNAME="${{ secrets.DB_USERNAME }}"
             DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
             APP_JAR="$APP_DIR/$APP_NAME.jar"
-            NEW_JAR="/tmp/$APP_NAME.jar"
+            SRC_TGZ="/tmp/$APP_NAME-src.tar.gz"
+            BUILD_DIR="$APP_DIR/source"
+            BUILD_NEW="$APP_DIR/source.new"
+            BUILD_PREV="$APP_DIR/source.prev"
             BACKUP_DIR="$APP_DIR/backup"
             LOG_DIR="$APP_DIR/logs"
             UPLOAD_DIR="/www/wwwroot/uploadPath"
@@ -79,8 +76,31 @@ jobs:
 
             mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR" "$UPLOAD_DIR"
 
+            if [ ! -f "$SRC_TGZ" ]; then
+              echo "Uploaded source package not found: $SRC_TGZ"
+              exit 1
+            fi
+
+            for path in "$BUILD_NEW" "$BUILD_PREV"; do
+              case "$path" in
+                "$APP_DIR"/*) rm -rf "$path" ;;
+                *) echo "Refusing to delete unexpected path: $path"; exit 1 ;;
+              esac
+            done
+
+            mkdir -p "$BUILD_NEW"
+            tar -xzf "$SRC_TGZ" -C "$BUILD_NEW"
+
+            if ! command -v mvn >/dev/null 2>&1; then
+              yum install -y maven
+            fi
+
+            cd "$BUILD_NEW"
+            mvn -B -DskipTests clean package
+
+            NEW_JAR="$BUILD_NEW/ruoyi-admin/target/ruoyi-admin.jar"
             if [ ! -f "$NEW_JAR" ]; then
-              echo "Uploaded jar not found: $NEW_JAR"
+              echo "Built jar not found: $NEW_JAR"
               exit 1
             fi
 
@@ -88,8 +108,14 @@ jobs:
               cp "$APP_JAR" "$BACKUP_DIR/$APP_NAME-$(date +%Y%m%d%H%M%S).jar"
             fi
 
-            mv "$NEW_JAR" "$APP_JAR"
+            cp "$NEW_JAR" "$APP_JAR"
             chmod 755 "$APP_JAR"
+            rm -f "$SRC_TGZ" "/tmp/$APP_NAME.jar"
+
+            if [ -d "$BUILD_DIR" ]; then
+              mv "$BUILD_DIR" "$BUILD_PREV"
+            fi
+            mv "$BUILD_NEW" "$BUILD_DIR"
 
             if command -v systemctl >/dev/null 2>&1; then
               JAVA_BIN="$(command -v java || true)"
