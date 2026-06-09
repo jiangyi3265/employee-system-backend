@@ -14,6 +14,7 @@ env:
   APP_DIR: /www/wwwroot/gljava
   APP_NAME: ruoyi-admin
   APP_PORT: 9090
+  UPLOAD_DIR: /www/wwwroot/uploadPath
 
 jobs:
   deploy:
@@ -23,13 +24,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Package source
-        run: git archive --format=tar.gz --output="/tmp/$APP_NAME-src.tar.gz" HEAD
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+          cache: maven
+
+      - name: Build backend jar
+        run: mvn -B -DskipTests clean package
+
+      - name: Verify jar
+        run: test -f "ruoyi-admin/target/${APP_NAME}.jar"
 
       - name: Install SSH tools
         run: sudo apt-get update && sudo apt-get install -y sshpass
 
-      - name: Upload source
+      - name: Upload jar
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
@@ -37,23 +48,27 @@ jobs:
           SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
         run: |
           set -euo pipefail
+          : "${SERVER_HOST:?SERVER_HOST secret is required}"
+          : "${SERVER_USER:?SERVER_USER secret is required}"
+          : "${SERVER_PASSWORD:?SERVER_PASSWORD secret is required}"
 
           export SSHPASS="$SERVER_PASSWORD"
           sshpass -e scp \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
+            -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=20 \
+            -o ServerAliveCountMax=3 \
             -P "${SERVER_PORT:-22}" \
-            "/tmp/$APP_NAME-src.tar.gz" \
-            "$SERVER_USER@$SERVER_HOST:/tmp/$APP_NAME-src.tar.gz"
+            "ruoyi-admin/target/${APP_NAME}.jar" \
+            "$SERVER_USER@$SERVER_HOST:/tmp/${APP_NAME}.jar"
 
-      - name: Build and restart backend
+      - name: Publish backend
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           password: ${{ secrets.SERVER_PASSWORD }}
           port: ${{ secrets.SERVER_PORT || '22' }}
-          command_timeout: 20m
+          command_timeout: 10m
           script_stop: true
           script: |
             set -e
@@ -61,47 +76,20 @@ jobs:
             APP_DIR="${{ env.APP_DIR }}"
             APP_NAME="${{ env.APP_NAME }}"
             APP_PORT="${{ env.APP_PORT }}"
+            UPLOAD_DIR="${{ env.UPLOAD_DIR }}"
             DB_USERNAME="${{ secrets.DB_USERNAME }}"
             DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
             APP_JAR="$APP_DIR/$APP_NAME.jar"
-            SRC_TGZ="/tmp/$APP_NAME-src.tar.gz"
-            BUILD_DIR="$APP_DIR/source"
-            BUILD_NEW="$APP_DIR/source.new"
-            BUILD_PREV="$APP_DIR/source.prev"
+            TMP_JAR="/tmp/$APP_NAME.jar"
             BACKUP_DIR="$APP_DIR/backup"
             LOG_DIR="$APP_DIR/logs"
-            UPLOAD_DIR="/www/wwwroot/uploadPath"
             : "${DB_USERNAME:=ha}"
             : "${DB_PASSWORD:=123456}"
 
             mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR" "$UPLOAD_DIR"
 
-            if [ ! -f "$SRC_TGZ" ]; then
-              echo "Uploaded source package not found: $SRC_TGZ"
-              exit 1
-            fi
-
-            for path in "$BUILD_NEW" "$BUILD_PREV"; do
-              if [[ "$path" != "$APP_DIR"/* ]]; then
-                echo "Refusing to delete unexpected path: $path"
-                exit 1
-              fi
-              rm -rf "$path"
-            done
-
-            mkdir -p "$BUILD_NEW"
-            tar -xzf "$SRC_TGZ" -C "$BUILD_NEW"
-
-            if ! command -v mvn >/dev/null 2>&1; then
-              yum install -y maven
-            fi
-
-            cd "$BUILD_NEW"
-            mvn -B -DskipTests clean package
-
-            NEW_JAR="$BUILD_NEW/ruoyi-admin/target/ruoyi-admin.jar"
-            if [ ! -f "$NEW_JAR" ]; then
-              echo "Built jar not found: $NEW_JAR"
+            if [ ! -f "$TMP_JAR" ]; then
+              echo "Uploaded jar not found: $TMP_JAR"
               exit 1
             fi
 
@@ -109,21 +97,43 @@ jobs:
               cp "$APP_JAR" "$BACKUP_DIR/$APP_NAME-$(date +%Y%m%d%H%M%S).jar"
             fi
 
-            cp "$NEW_JAR" "$APP_JAR"
+            cp "$TMP_JAR" "$APP_JAR"
             chmod 755 "$APP_JAR"
-            rm -f "$SRC_TGZ" "/tmp/$APP_NAME.jar"
+            rm -f "$TMP_JAR"
 
-            if [ -d "$BUILD_DIR" ]; then
-              mv "$BUILD_DIR" "$BUILD_PREV"
+            JAVA_BIN="$(command -v java || true)"
+            if [ -z "$JAVA_BIN" ]; then
+              if command -v yum >/dev/null 2>&1; then
+                yum install -y java-1.8.0-openjdk || yum install -y java-11-openjdk
+              elif command -v apt-get >/dev/null 2>&1; then
+                apt-get update
+                apt-get install -y openjdk-8-jre-headless || apt-get install -y default-jre
+              fi
+              JAVA_BIN="$(command -v java || true)"
             fi
-            mv "$BUILD_NEW" "$BUILD_DIR"
+
+            if [ -z "$JAVA_BIN" ]; then
+              echo "java command not found on server"
+              exit 1
+            fi
 
             if command -v systemctl >/dev/null 2>&1; then
-              JAVA_BIN="$(command -v java || true)"
-              if [ -z "$JAVA_BIN" ]; then
-                echo "java command not found on server"
-                exit 1
-              fi
+              sh_quote() {
+                printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
+              }
+
+              START_SCRIPT="$APP_DIR/start-$APP_NAME.sh"
+              cat >"$START_SCRIPT" <<EOF
+            #!/bin/sh
+            exec $(sh_quote "$JAVA_BIN") -jar $(sh_quote "$APP_JAR") \\
+              --server.port=$(sh_quote "$APP_PORT") \\
+              --ruoyi.profile=$(sh_quote "$UPLOAD_DIR") \\
+              --spring.datasource.druid.master.username=$(sh_quote "$DB_USERNAME") \\
+              --spring.datasource.druid.master.password=$(sh_quote "$DB_PASSWORD") \\
+              >> $(sh_quote "$LOG_DIR/$APP_NAME.log") \\
+              2>> $(sh_quote "$LOG_DIR/$APP_NAME.err.log")
+            EOF
+              chmod 755 "$START_SCRIPT"
 
               cat >/etc/systemd/system/$APP_NAME.service <<EOF
             [Unit]
@@ -133,7 +143,7 @@ jobs:
             [Service]
             Type=simple
             WorkingDirectory=$APP_DIR
-            ExecStart=/bin/sh -lc 'exec $JAVA_BIN -jar $APP_JAR --server.port=$APP_PORT --ruoyi.profile=$UPLOAD_DIR --spring.datasource.druid.master.username=$DB_USERNAME --spring.datasource.druid.master.password=$DB_PASSWORD >> $LOG_DIR/$APP_NAME.log 2>> $LOG_DIR/$APP_NAME.err.log'
+            ExecStart=/bin/sh $START_SCRIPT
             Restart=always
             RestartSec=5
             SuccessExitStatus=143
@@ -148,7 +158,13 @@ jobs:
               systemctl --no-pager --full status "$APP_NAME"
             else
               pkill -f "$APP_NAME.jar" || true
-              nohup java -jar "$APP_JAR" > "$LOG_DIR/$APP_NAME.log" 2> "$LOG_DIR/$APP_NAME.err.log" &
+              nohup "$JAVA_BIN" -jar "$APP_JAR" \
+                --server.port="$APP_PORT" \
+                --ruoyi.profile="$UPLOAD_DIR" \
+                --spring.datasource.druid.master.username="$DB_USERNAME" \
+                --spring.datasource.druid.master.password="$DB_PASSWORD" \
+                > "$LOG_DIR/$APP_NAME.log" \
+                2> "$LOG_DIR/$APP_NAME.err.log" &
               sleep 5
               pgrep -f "$APP_NAME.jar"
             fi
