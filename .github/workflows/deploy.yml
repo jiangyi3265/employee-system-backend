@@ -102,14 +102,14 @@ jobs:
             "${DB_USERNAME:-}" \
             "${DB_PASSWORD:-}" <<'EOF'
           set -euo pipefail
-          DEPLOY_DIR="$1"
-          RELEASE_JAR="$2"
-          RESTART_COMMAND="$3"
-          JAVA_OPTS="$4"
-          APP_PORT="$5"
-          UPLOAD_DIR="$6"
-          DB_USERNAME="$7"
-          DB_PASSWORD="$8"
+          DEPLOY_DIR="${1:-}"
+          RELEASE_JAR="${2:-}"
+          RESTART_COMMAND="${3:-}"
+          JAVA_OPTS="${4:-}"
+          APP_PORT="${5:-9090}"
+          UPLOAD_DIR="${6:-/www/wwwroot/uploadPath}"
+          DB_USERNAME="${7:-}"
+          DB_PASSWORD="${8:-}"
 
           ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
           mkdir -p "$UPLOAD_DIR"
