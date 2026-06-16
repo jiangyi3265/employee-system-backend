@@ -1,4 +1,4 @@
-name: Deploy backend
+name: Deploy Backend
 
 on:
   push:
@@ -6,165 +6,155 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: deploy-backend
   cancel-in-progress: true
 
-env:
-  APP_DIR: /www/wwwroot/gljava
-  APP_NAME: ruoyi-admin
-  APP_PORT: 9090
-  UPLOAD_DIR: /www/wwwroot/uploadPath
-
 jobs:
   deploy:
+    name: Build and deploy backend
     runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_PORT: ${{ secrets.SSH_PORT }}
+      SSH_USER: ${{ secrets.SSH_USER }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+      SERVER_HOST: ${{ secrets.SERVER_HOST }}
+      SERVER_PORT: ${{ secrets.SERVER_PORT }}
+      SERVER_USER: ${{ secrets.SERVER_USER }}
+      SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+      BACKEND_DEPLOY_DIR: ${{ secrets.BACKEND_DEPLOY_DIR }}
+      BACKEND_JAVA_OPTS: ${{ secrets.BACKEND_JAVA_OPTS }}
+      BACKEND_PORT: ${{ secrets.BACKEND_PORT }}
+      BACKEND_UPLOAD_DIR: ${{ secrets.BACKEND_UPLOAD_DIR }}
+      BACKEND_RESTART_COMMAND: ${{ secrets.BACKEND_RESTART_COMMAND }}
+      BACKEND_HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
+      DB_USERNAME: ${{ secrets.DB_USERNAME }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '8'
           cache: maven
 
-      - name: Build backend jar
-        run: mvn -B -DskipTests clean package
+      - name: Build jar
+        run: mvn -B clean package -DskipTests
 
-      - name: Verify jar
-        run: test -f "ruoyi-admin/target/${APP_NAME}.jar"
-
-      - name: Install SSH tools
-        run: sudo apt-get update && sudo apt-get install -y sshpass
-
-      - name: Upload jar
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
-          SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
-          SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
+      - name: Deploy backend
+        shell: bash
         run: |
           set -euo pipefail
-          : "${SERVER_HOST:?SERVER_HOST secret is required}"
-          : "${SERVER_USER:?SERVER_USER secret is required}"
-          : "${SERVER_PASSWORD:?SERVER_PASSWORD secret is required}"
+          SSH_HOST="${SSH_HOST:-${SERVER_HOST:-}}"
+          SSH_PORT="${SSH_PORT:-${SERVER_PORT:-22}}"
+          SSH_USER="${SSH_USER:-${SERVER_USER:-}}"
+          SSH_PASSWORD="${SSH_PASSWORD:-${SERVER_PASSWORD:-}}"
+          DEPLOY_DIR="${BACKEND_DEPLOY_DIR:-/www/wwwroot/gljava}"
+          RELEASE_JAR="ruoyi-admin-${GITHUB_SHA}.jar"
+          SSH_TARGET="${SSH_USER}@${SSH_HOST}"
 
-          export SSHPASS="$SERVER_PASSWORD"
-          sshpass -e scp \
-            -o StrictHostKeyChecking=accept-new \
-            -o ServerAliveInterval=20 \
-            -o ServerAliveCountMax=3 \
-            -P "${SERVER_PORT:-22}" \
-            "ruoyi-admin/target/${APP_NAME}.jar" \
-            "$SERVER_USER@$SERVER_HOST:/tmp/${APP_NAME}.jar"
+          : "${SSH_HOST:?Missing secret SSH_HOST}"
+          : "${SSH_USER:?Missing secret SSH_USER}"
 
-      - name: Publish backend
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          password: ${{ secrets.SERVER_PASSWORD }}
-          port: ${{ secrets.SERVER_PORT || '22' }}
-          command_timeout: 10m
-          script_stop: true
-          script: |
-            set -e
+          SSH_COMMON=(-p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=20 -o ServerAliveCountMax=3)
+          SCP_COMMON=(-P "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=20 -o ServerAliveCountMax=3)
 
-            APP_DIR="${{ env.APP_DIR }}"
-            APP_NAME="${{ env.APP_NAME }}"
-            APP_PORT="${{ env.APP_PORT }}"
-            UPLOAD_DIR="${{ env.UPLOAD_DIR }}"
-            DB_USERNAME="${{ secrets.DB_USERNAME }}"
-            DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
-            APP_JAR="$APP_DIR/$APP_NAME.jar"
-            TMP_JAR="/tmp/$APP_NAME.jar"
-            BACKUP_DIR="$APP_DIR/backup"
-            LOG_DIR="$APP_DIR/logs"
-            : "${DB_USERNAME:=ha}"
-            : "${DB_PASSWORD:=123456}"
+          if [ -n "${SSH_PRIVATE_KEY:-}" ]; then
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+            chmod 600 ~/.ssh/deploy_key
+            SSH_CMD=(ssh -i ~/.ssh/deploy_key "${SSH_COMMON[@]}")
+            SCP_CMD=(scp -i ~/.ssh/deploy_key "${SCP_COMMON[@]}")
+          else
+            : "${SSH_PASSWORD:?Missing secret SSH_PRIVATE_KEY or SSH_PASSWORD}"
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+            export SSHPASS="$SSH_PASSWORD"
+            SSH_CMD=(sshpass -e ssh "${SSH_COMMON[@]}")
+            SCP_CMD=(sshpass -e scp "${SCP_COMMON[@]}")
+          fi
 
-            mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR" "$UPLOAD_DIR"
+          "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- "$DEPLOY_DIR" <<'EOF'
+          set -euo pipefail
+          DEPLOY_DIR="$1"
+          mkdir -p "$DEPLOY_DIR/releases" "$DEPLOY_DIR/logs"
+          EOF
 
-            if [ ! -f "$TMP_JAR" ]; then
-              echo "Uploaded jar not found: $TMP_JAR"
-              exit 1
-            fi
+          "${SCP_CMD[@]}" ruoyi-admin/target/ruoyi-admin.jar "$SSH_TARGET:$DEPLOY_DIR/releases/$RELEASE_JAR"
 
-            if [ -f "$APP_JAR" ]; then
-              cp "$APP_JAR" "$BACKUP_DIR/$APP_NAME-$(date +%Y%m%d%H%M%S).jar"
-            fi
+          "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- \
+            "$DEPLOY_DIR" \
+            "$RELEASE_JAR" \
+            "${BACKEND_RESTART_COMMAND:-}" \
+            "${BACKEND_JAVA_OPTS:-}" \
+            "${BACKEND_PORT:-9090}" \
+            "${BACKEND_UPLOAD_DIR:-/www/wwwroot/uploadPath}" \
+            "${DB_USERNAME:-}" \
+            "${DB_PASSWORD:-}" <<'EOF'
+          set -euo pipefail
+          DEPLOY_DIR="$1"
+          RELEASE_JAR="$2"
+          RESTART_COMMAND="$3"
+          JAVA_OPTS="$4"
+          APP_PORT="$5"
+          UPLOAD_DIR="$6"
+          DB_USERNAME="$7"
+          DB_PASSWORD="$8"
 
-            cp "$TMP_JAR" "$APP_JAR"
-            chmod 755 "$APP_JAR"
-            rm -f "$TMP_JAR"
+          ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
+          mkdir -p "$UPLOAD_DIR"
 
-            JAVA_BIN="$(command -v java || true)"
-            if [ -z "$JAVA_BIN" ]; then
-              if command -v yum >/dev/null 2>&1; then
-                yum install -y java-1.8.0-openjdk || yum install -y java-11-openjdk
-              elif command -v apt-get >/dev/null 2>&1; then
-                apt-get update
-                apt-get install -y openjdk-8-jre-headless || apt-get install -y default-jre
+          if [ -n "$RESTART_COMMAND" ]; then
+            bash -lc "$RESTART_COMMAND"
+          else
+            if [ -f "$DEPLOY_DIR/app.pid" ]; then
+              OLD_PID="$(cat "$DEPLOY_DIR/app.pid" || true)"
+              if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                kill "$OLD_PID"
+                for _ in $(seq 1 20); do
+                  kill -0 "$OLD_PID" 2>/dev/null || break
+                  sleep 1
+                done
               fi
-              JAVA_BIN="$(command -v java || true)"
             fi
 
-            if [ -z "$JAVA_BIN" ]; then
-              echo "java command not found on server"
-              exit 1
+            APP_ARGS=("--server.port=$APP_PORT" "--ruoyi.profile=$UPLOAD_DIR")
+            if [ -n "$DB_USERNAME" ]; then
+              APP_ARGS+=("--spring.datasource.druid.master.username=$DB_USERNAME")
+            fi
+            if [ -n "$DB_PASSWORD" ]; then
+              APP_ARGS+=("--spring.datasource.druid.master.password=$DB_PASSWORD")
             fi
 
-            if command -v systemctl >/dev/null 2>&1; then
-              sh_quote() {
-                printf "'%s'" "$(printf "%s" "$1" | sed "s/'/'\\\\''/g")"
-              }
+            nohup java $JAVA_OPTS -jar "$DEPLOY_DIR/ruoyi-admin.jar" "${APP_ARGS[@]}" > "$DEPLOY_DIR/logs/app.log" 2>&1 &
+            echo $! > "$DEPLOY_DIR/app.pid"
+          fi
 
-              START_SCRIPT="$APP_DIR/start-$APP_NAME.sh"
-              cat >"$START_SCRIPT" <<EOF
-            #!/bin/sh
-            exec $(sh_quote "$JAVA_BIN") -jar $(sh_quote "$APP_JAR") \\
-              --server.port=$(sh_quote "$APP_PORT") \\
-              --ruoyi.profile=$(sh_quote "$UPLOAD_DIR") \\
-              --spring.datasource.druid.master.username=$(sh_quote "$DB_USERNAME") \\
-              --spring.datasource.druid.master.password=$(sh_quote "$DB_PASSWORD") \\
-              >> $(sh_quote "$LOG_DIR/$APP_NAME.log") \\
-              2>> $(sh_quote "$LOG_DIR/$APP_NAME.err.log")
-            EOF
-              chmod 755 "$START_SCRIPT"
+          ls -lh "$DEPLOY_DIR/ruoyi-admin.jar"
+          EOF
 
-              cat >/etc/systemd/system/$APP_NAME.service <<EOF
-            [Unit]
-            Description=RuoYi backend service
-            After=network.target
-
-            [Service]
-            Type=simple
-            WorkingDirectory=$APP_DIR
-            ExecStart=/bin/sh $START_SCRIPT
-            Restart=always
-            RestartSec=5
-            SuccessExitStatus=143
-
-            [Install]
-            WantedBy=multi-user.target
-            EOF
-
-              systemctl daemon-reload
-              systemctl enable "$APP_NAME"
-              systemctl restart "$APP_NAME"
-              systemctl --no-pager --full status "$APP_NAME"
-            else
-              pkill -f "$APP_NAME.jar" || true
-              nohup "$JAVA_BIN" -jar "$APP_JAR" \
-                --server.port="$APP_PORT" \
-                --ruoyi.profile="$UPLOAD_DIR" \
-                --spring.datasource.druid.master.username="$DB_USERNAME" \
-                --spring.datasource.druid.master.password="$DB_PASSWORD" \
-                > "$LOG_DIR/$APP_NAME.log" \
-                2> "$LOG_DIR/$APP_NAME.err.log" &
-              sleep 5
-              pgrep -f "$APP_NAME.jar"
+      - name: Health check
+        if: ${{ env.BACKEND_HEALTHCHECK_URL != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            if curl -fsS "$BACKEND_HEALTHCHECK_URL" >/dev/null; then
+              echo "Backend health check passed."
+              exit 0
             fi
+            sleep 2
+          done
+
+          echo "Backend health check failed: $BACKEND_HEALTHCHECK_URL"
+          exit 1
