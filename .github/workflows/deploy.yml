@@ -92,24 +92,34 @@ jobs:
 
           "${SCP_CMD[@]}" ruoyi-admin/target/ruoyi-admin.jar "$SSH_TARGET:$DEPLOY_DIR/releases/$RELEASE_JAR"
 
+          RESTART_COMMAND_ARG="${BACKEND_RESTART_COMMAND:-__EMPTY__}"
+          JAVA_OPTS_ARG="${BACKEND_JAVA_OPTS:-__EMPTY__}"
+          DB_USERNAME_ARG="${DB_USERNAME:-__EMPTY__}"
+          DB_PASSWORD_ARG="${DB_PASSWORD:-__EMPTY__}"
+
           "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- \
             "$DEPLOY_DIR" \
             "$RELEASE_JAR" \
-            "${BACKEND_RESTART_COMMAND:-}" \
-            "${BACKEND_JAVA_OPTS:-}" \
             "${BACKEND_PORT:-9090}" \
             "${BACKEND_UPLOAD_DIR:-/www/wwwroot/uploadPath}" \
-            "${DB_USERNAME:-}" \
-            "${DB_PASSWORD:-}" <<'EOF'
+            "$DB_USERNAME_ARG" \
+            "$DB_PASSWORD_ARG" \
+            "$JAVA_OPTS_ARG" \
+            "$RESTART_COMMAND_ARG" <<'EOF'
           set -euo pipefail
           DEPLOY_DIR="${1:-}"
           RELEASE_JAR="${2:-}"
-          RESTART_COMMAND="${3:-}"
-          JAVA_OPTS="${4:-}"
-          APP_PORT="${5:-9090}"
-          UPLOAD_DIR="${6:-/www/wwwroot/uploadPath}"
-          DB_USERNAME="${7:-}"
-          DB_PASSWORD="${8:-}"
+          APP_PORT="${3:-9090}"
+          UPLOAD_DIR="${4:-/www/wwwroot/uploadPath}"
+          DB_USERNAME="${5:-__EMPTY__}"
+          DB_PASSWORD="${6:-__EMPTY__}"
+          JAVA_OPTS="${7:-__EMPTY__}"
+          RESTART_COMMAND="${8:-__EMPTY__}"
+
+          [ "$DB_USERNAME" = "__EMPTY__" ] && DB_USERNAME=""
+          [ "$DB_PASSWORD" = "__EMPTY__" ] && DB_PASSWORD=""
+          [ "$JAVA_OPTS" = "__EMPTY__" ] && JAVA_OPTS=""
+          [ "$RESTART_COMMAND" = "__EMPTY__" ] && RESTART_COMMAND=""
 
           ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
           mkdir -p "$UPLOAD_DIR"
