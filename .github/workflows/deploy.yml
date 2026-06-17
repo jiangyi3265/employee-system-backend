@@ -196,8 +196,6 @@ jobs:
             PORT_PIDS=""
             if command -v fuser >/dev/null 2>&1; then
               PORT_PIDS="$(fuser -n tcp "$APP_PORT" 2>/dev/null || true)"
-            elif command -v ss >/dev/null 2>&1; then
-              PORT_PIDS="$(ss -ltnp 2>/dev/null | awk -v port=":$APP_PORT" '$4 ~ port"$" { print $0 }' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u || true)"
             fi
             for PORT_PID in $PORT_PIDS; do
               stop_pid "$PORT_PID"
