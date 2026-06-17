@@ -271,6 +271,10 @@ public class SqmsRecordController implements InitializingBean
 
         if (StringUtils.isEmpty(phone) || StringUtils.isEmpty(password))
         {
+            if ("customers".equals(table))
+            {
+                return loginResult(table, createWechatCustomer(openid, unionid, body));
+            }
             return AjaxResult.error("首次微信登录请先输入手机号和密码完成绑定");
         }
 
@@ -298,6 +302,11 @@ public class SqmsRecordController implements InitializingBean
             }
         }
 
+        if ("customers".equals(table))
+        {
+            return loginResult(table, createWechatCustomer(openid, unionid, body));
+        }
+
         return AjaxResult.error("手机号未注册");
     }
 
@@ -322,6 +331,27 @@ public class SqmsRecordController implements InitializingBean
         customer.put("ownerId", "");
         customer.put("approved", false);
         return AjaxResult.success(sanitizeUser(upsert("customers", customer)));
+    }
+
+    private Map<String, Object> createWechatCustomer(String openid, String unionid, Map<String, Object> body)
+    {
+        Map<String, Object> customer = new LinkedHashMap<>();
+        String name = asString(body.get("name"));
+        customer.put("name", StringUtils.isEmpty(name) ? "微信客户" : name);
+        customer.put("phone", body.getOrDefault("phone", ""));
+        customer.put("password", body.getOrDefault("password", ""));
+        customer.put("company", body.getOrDefault("company", ""));
+        customer.put("grade", "C");
+        customer.put("pool", "public");
+        customer.put("ownerId", "");
+        customer.put("approved", true);
+        customer.put("wechatOpenid", openid);
+        if (!StringUtils.isEmpty(unionid))
+        {
+            customer.put("wechatUnionid", unionid);
+        }
+        customer.put("wechatBindTime", System.currentTimeMillis());
+        return upsert("customers", customer);
     }
 
     private Map<String, Object> requestWechatSession(String code)
