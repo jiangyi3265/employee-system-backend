@@ -200,6 +200,8 @@ jobs:
               APP_ARGS+=("--sqms.wechat.app-secret=$WECHAT_APP_SECRET")
             fi
 
+            export WECHAT_APP_ID
+            export WECHAT_APP_SECRET
             nohup java $JAVA_OPTS -jar "$DEPLOY_DIR/ruoyi-admin.jar" "${APP_ARGS[@]}" < /dev/null > "$DEPLOY_DIR/logs/app.log" 2>&1 &
             echo $! > "$DEPLOY_DIR/app.pid"
             sleep 5
