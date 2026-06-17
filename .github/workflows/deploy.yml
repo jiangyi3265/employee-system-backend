@@ -42,6 +42,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -64,6 +66,11 @@ jobs:
           DEPLOY_DIR="${BACKEND_DEPLOY_DIR:-/www/wwwroot/gljava}"
           RELEASE_JAR="ruoyi-admin-${GITHUB_SHA}.jar"
           SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+          REUSE_EXISTING_JAR=0
+          CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" || true)"
+          if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -v '^\.github/workflows/deploy\.yml$' >/dev/null; then
+            REUSE_EXISTING_JAR=1
+          fi
 
           : "${SSH_HOST:?Missing secret SSH_HOST}"
           : "${SSH_USER:?Missing secret SSH_USER}"
@@ -93,19 +100,23 @@ jobs:
           mkdir -p "$DEPLOY_DIR/releases" "$DEPLOY_DIR/logs"
           EOF
 
-          gzip -1 -c ruoyi-admin/target/ruoyi-admin.jar > ruoyi-admin.jar.gz
-          CHUNK_DIR="$(mktemp -d)"
-          split -b 2m ruoyi-admin.jar.gz "$CHUNK_DIR/part-"
-          CHUNKS=("$CHUNK_DIR"/part-*)
-          TOTAL_CHUNKS="${#CHUNKS[@]}"
-          UPLOAD_TARGET="$(printf '%q' "$DEPLOY_DIR/releases/$RELEASE_JAR.gz")"
-          "${SSH_CMD[@]}" "$SSH_TARGET" "cat /dev/null > $UPLOAD_TARGET"
-          CHUNK_INDEX=0
-          for chunk in "${CHUNKS[@]}"; do
-            CHUNK_INDEX=$((CHUNK_INDEX + 1))
-            echo "Uploading backend artifact chunk $CHUNK_INDEX/$TOTAL_CHUNKS"
-            timeout 300 "${SSH_CMD[@]}" "$SSH_TARGET" "cat >> $UPLOAD_TARGET" < "$chunk"
-          done
+          if [ "$REUSE_EXISTING_JAR" = "1" ]; then
+            echo "Only deployment workflow changed; reusing existing backend artifact on server."
+          else
+            gzip -1 -c ruoyi-admin/target/ruoyi-admin.jar > ruoyi-admin.jar.gz
+            CHUNK_DIR="$(mktemp -d)"
+            split -b 2m ruoyi-admin.jar.gz "$CHUNK_DIR/part-"
+            CHUNKS=("$CHUNK_DIR"/part-*)
+            TOTAL_CHUNKS="${#CHUNKS[@]}"
+            UPLOAD_TARGET="$(printf '%q' "$DEPLOY_DIR/releases/$RELEASE_JAR.gz")"
+            "${SSH_CMD[@]}" "$SSH_TARGET" "cat /dev/null > $UPLOAD_TARGET"
+            CHUNK_INDEX=0
+            for chunk in "${CHUNKS[@]}"; do
+              CHUNK_INDEX=$((CHUNK_INDEX + 1))
+              echo "Uploading backend artifact chunk $CHUNK_INDEX/$TOTAL_CHUNKS"
+              timeout 300 "${SSH_CMD[@]}" "$SSH_TARGET" "cat >> $UPLOAD_TARGET" < "$chunk"
+            done
+          fi
 
           RESTART_COMMAND_ARG="${BACKEND_RESTART_COMMAND:-__EMPTY__}"
           JAVA_OPTS_ARG="${BACKEND_JAVA_OPTS:-__EMPTY__}"
@@ -124,7 +135,8 @@ jobs:
             "$JAVA_OPTS_ARG" \
             "$RESTART_COMMAND_ARG" \
             "$WECHAT_APP_ID_ARG" \
-            "$WECHAT_APP_SECRET_ARG" <<'EOF'
+            "$WECHAT_APP_SECRET_ARG" \
+            "$REUSE_EXISTING_JAR" <<'EOF'
           set -euo pipefail
           DEPLOY_DIR="${1:-}"
           RELEASE_JAR="${2:-}"
@@ -136,6 +148,7 @@ jobs:
           RESTART_COMMAND="${8:-__EMPTY__}"
           WECHAT_APP_ID="${9:-__EMPTY__}"
           WECHAT_APP_SECRET="${10:-__EMPTY__}"
+          REUSE_EXISTING_JAR="${11:-0}"
 
           [ "$DB_USERNAME" = "__EMPTY__" ] && DB_USERNAME=""
           [ "$DB_PASSWORD" = "__EMPTY__" ] && DB_PASSWORD=""
@@ -144,12 +157,19 @@ jobs:
           [ "$WECHAT_APP_ID" = "__EMPTY__" ] && WECHAT_APP_ID=""
           [ "$WECHAT_APP_SECRET" = "__EMPTY__" ] && WECHAT_APP_SECRET=""
 
-          if [ -f "$DEPLOY_DIR/releases/$RELEASE_JAR.gz" ]; then
+          if [ "$REUSE_EXISTING_JAR" = "1" ]; then
+            CURRENT_JAR_PATH="$(readlink -f "$DEPLOY_DIR/ruoyi-admin.jar" || true)"
+            if [ -z "$CURRENT_JAR_PATH" ] || [ ! -f "$CURRENT_JAR_PATH" ]; then
+              echo "No existing backend artifact found on server."
+              exit 1
+            fi
+            RELEASE_JAR="$(basename "$CURRENT_JAR_PATH")"
+          elif [ -f "$DEPLOY_DIR/releases/$RELEASE_JAR.gz" ]; then
             gzip -dc "$DEPLOY_DIR/releases/$RELEASE_JAR.gz" > "$DEPLOY_DIR/releases/$RELEASE_JAR"
             rm -f "$DEPLOY_DIR/releases/$RELEASE_JAR.gz"
+            ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
           fi
 
-          ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
           mkdir -p "$UPLOAD_DIR"
 
           if [ -n "$RESTART_COMMAND" ]; then
