@@ -175,31 +175,16 @@ jobs:
           if [ -n "$RESTART_COMMAND" ]; then
             bash -lc "$RESTART_COMMAND"
           else
-            stop_pid() {
-              TARGET_PID="${1:-}"
-              if [ -z "$TARGET_PID" ] || ! kill -0 "$TARGET_PID" 2>/dev/null; then
-                return
-              fi
-              kill "$TARGET_PID" 2>/dev/null || true
-              for _ in $(seq 1 20); do
-                kill -0 "$TARGET_PID" 2>/dev/null || return
-                sleep 1
-              done
-              kill -9 "$TARGET_PID" 2>/dev/null || true
-            }
-
             if [ -f "$DEPLOY_DIR/app.pid" ]; then
               OLD_PID="$(cat "$DEPLOY_DIR/app.pid" || true)"
-              stop_pid "$OLD_PID"
+              if [ -n "$OLD_PID" ]; then
+                kill "$OLD_PID" 2>/dev/null || true
+                sleep 5
+                kill -9 "$OLD_PID" 2>/dev/null || true
+              fi
             fi
-
-            PORT_PIDS=""
-            if command -v fuser >/dev/null 2>&1; then
-              PORT_PIDS="$(fuser -n tcp "$APP_PORT" 2>/dev/null || true)"
-            fi
-            for PORT_PID in $PORT_PIDS; do
-              stop_pid "$PORT_PID"
-            fi
+            command -v fuser >/dev/null 2>&1 && fuser -k -n tcp "$APP_PORT" 2>/dev/null || true
+            sleep 2
 
             APP_ARGS=("--server.port=$APP_PORT" "--ruoyi.profile=$UPLOAD_DIR")
             if [ -n "$DB_USERNAME" ]; then
