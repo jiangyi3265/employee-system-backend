@@ -67,9 +67,16 @@ jobs:
           RELEASE_JAR="ruoyi-admin-${GITHUB_SHA}.jar"
           SSH_TARGET="${SSH_USER}@${SSH_HOST}"
           REUSE_EXISTING_JAR=0
+          CLASS_PATCH=0
+          PATCH_CLASS_SOURCE="ruoyi-admin/target/classes/com/ruoyi/web/controller/sqms/SqmsRecordController.class"
+          PATCH_CLASS_ENTRY="BOOT-INF/classes/com/ruoyi/web/controller/sqms/SqmsRecordController.class"
+          PATCH_DIR="$DEPLOY_DIR/patches/$GITHUB_SHA"
           CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" || true)"
           if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -v '^\.github/workflows/deploy\.yml$' >/dev/null; then
             REUSE_EXISTING_JAR=1
+          fi
+          if [ "$REUSE_EXISTING_JAR" = "1" ] && [ -f "$PATCH_CLASS_SOURCE" ]; then
+            CLASS_PATCH=1
           fi
 
           : "${SSH_HOST:?Missing secret SSH_HOST}"
@@ -100,7 +107,17 @@ jobs:
           mkdir -p "$DEPLOY_DIR/releases" "$DEPLOY_DIR/logs"
           EOF
 
-          if [ "$REUSE_EXISTING_JAR" = "1" ]; then
+          if [ "$CLASS_PATCH" = "1" ]; then
+            echo "Only deployment workflow changed; patching backend class into existing server jar."
+            PATCH_CLASS_TARGET="$(printf '%q' "$PATCH_DIR/$PATCH_CLASS_ENTRY")"
+            "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- "$PATCH_DIR" "$PATCH_CLASS_ENTRY" <<'EOF'
+          set -euo pipefail
+          PATCH_DIR="$1"
+          PATCH_CLASS_ENTRY="$2"
+          mkdir -p "$PATCH_DIR/$(dirname "$PATCH_CLASS_ENTRY")"
+          EOF
+            timeout 120 "${SSH_CMD[@]}" "$SSH_TARGET" "cat > $PATCH_CLASS_TARGET" < "$PATCH_CLASS_SOURCE"
+          elif [ "$REUSE_EXISTING_JAR" = "1" ]; then
             echo "Only deployment workflow changed; reusing existing backend artifact on server."
           else
             gzip -1 -c ruoyi-admin/target/ruoyi-admin.jar > ruoyi-admin.jar.gz
@@ -136,7 +153,10 @@ jobs:
             "$RESTART_COMMAND_ARG" \
             "$WECHAT_APP_ID_ARG" \
             "$WECHAT_APP_SECRET_ARG" \
-            "$REUSE_EXISTING_JAR" <<'EOF'
+            "$REUSE_EXISTING_JAR" \
+            "$CLASS_PATCH" \
+            "$PATCH_DIR" \
+            "$PATCH_CLASS_ENTRY" <<'EOF'
           set -euo pipefail
           DEPLOY_DIR="${1:-}"
           RELEASE_JAR="${2:-}"
@@ -149,6 +169,9 @@ jobs:
           WECHAT_APP_ID="${9:-__EMPTY__}"
           WECHAT_APP_SECRET="${10:-__EMPTY__}"
           REUSE_EXISTING_JAR="${11:-0}"
+          CLASS_PATCH="${12:-0}"
+          PATCH_DIR="${13:-}"
+          PATCH_CLASS_ENTRY="${14:-}"
 
           [ "$DB_USERNAME" = "__EMPTY__" ] && DB_USERNAME=""
           [ "$DB_PASSWORD" = "__EMPTY__" ] && DB_PASSWORD=""
@@ -157,7 +180,32 @@ jobs:
           [ "$WECHAT_APP_ID" = "__EMPTY__" ] && WECHAT_APP_ID=""
           [ "$WECHAT_APP_SECRET" = "__EMPTY__" ] && WECHAT_APP_SECRET=""
 
-          if [ "$REUSE_EXISTING_JAR" = "1" ]; then
+          if [ "$CLASS_PATCH" = "1" ]; then
+            CURRENT_JAR_PATH="$(readlink -f "$DEPLOY_DIR/ruoyi-admin.jar" || true)"
+            if [ -z "$CURRENT_JAR_PATH" ] || [ ! -f "$CURRENT_JAR_PATH" ]; then
+              echo "No existing backend artifact found on server."
+              exit 1
+            fi
+            cp "$CURRENT_JAR_PATH" "$DEPLOY_DIR/releases/$RELEASE_JAR"
+            if command -v jar >/dev/null 2>&1; then
+              (cd "$PATCH_DIR" && jar uf "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_CLASS_ENTRY")
+            elif command -v python3 >/dev/null 2>&1; then
+              python3 - "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_DIR/$PATCH_CLASS_ENTRY" "$PATCH_CLASS_ENTRY" <<'PY'
+          import sys
+          import zipfile
+
+          jar_path, class_path, class_entry = sys.argv[1:]
+          with open(class_path, "rb") as f:
+              data = f.read()
+          with zipfile.ZipFile(jar_path, "a", zipfile.ZIP_DEFLATED) as zf:
+              zf.writestr(class_entry, data)
+          PY
+            else
+              echo "No jar or python3 command found to patch backend artifact."
+              exit 1
+            fi
+            ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
+          elif [ "$REUSE_EXISTING_JAR" = "1" ]; then
             CURRENT_JAR_PATH="$(readlink -f "$DEPLOY_DIR/ruoyi-admin.jar" || true)"
             if [ -z "$CURRENT_JAR_PATH" ] || [ ! -f "$CURRENT_JAR_PATH" ]; then
               echo "No existing backend artifact found on server."
