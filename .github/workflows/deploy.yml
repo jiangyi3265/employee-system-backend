@@ -93,8 +93,19 @@ jobs:
           mkdir -p "$DEPLOY_DIR/releases" "$DEPLOY_DIR/logs"
           EOF
 
+          gzip -1 -c ruoyi-admin/target/ruoyi-admin.jar > ruoyi-admin.jar.gz
+          CHUNK_DIR="$(mktemp -d)"
+          split -b 2m ruoyi-admin.jar.gz "$CHUNK_DIR/part-"
+          CHUNKS=("$CHUNK_DIR"/part-*)
+          TOTAL_CHUNKS="${#CHUNKS[@]}"
           UPLOAD_TARGET="$(printf '%q' "$DEPLOY_DIR/releases/$RELEASE_JAR.gz")"
-          gzip -1 -c ruoyi-admin/target/ruoyi-admin.jar | "${SSH_CMD[@]}" "$SSH_TARGET" "cat > $UPLOAD_TARGET"
+          "${SSH_CMD[@]}" "$SSH_TARGET" "cat /dev/null > $UPLOAD_TARGET"
+          CHUNK_INDEX=0
+          for chunk in "${CHUNKS[@]}"; do
+            CHUNK_INDEX=$((CHUNK_INDEX + 1))
+            echo "Uploading backend artifact chunk $CHUNK_INDEX/$TOTAL_CHUNKS"
+            timeout 300 "${SSH_CMD[@]}" "$SSH_TARGET" "cat >> $UPLOAD_TARGET" < "$chunk"
+          done
 
           RESTART_COMMAND_ARG="${BACKEND_RESTART_COMMAND:-__EMPTY__}"
           JAVA_OPTS_ARG="${BACKEND_JAVA_OPTS:-__EMPTY__}"
