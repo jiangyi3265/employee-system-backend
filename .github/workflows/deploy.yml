@@ -17,7 +17,7 @@ jobs:
   deploy:
     name: Build and deploy backend
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       SSH_HOST: ${{ secrets.SSH_HOST }}
       SSH_PORT: ${{ secrets.SSH_PORT }}
@@ -69,7 +69,7 @@ jobs:
           : "${SSH_USER:?Missing secret SSH_USER}"
 
           SSH_COMMON=(-p "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=20 -o ServerAliveCountMax=3)
-          SCP_COMMON=(-P "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=20 -o ServerAliveCountMax=3)
+          SCP_COMMON=(-O -C -P "$SSH_PORT" -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=20 -o ServerAliveCountMax=3)
 
           if [ -n "${SSH_PRIVATE_KEY:-}" ]; then
             mkdir -p ~/.ssh
