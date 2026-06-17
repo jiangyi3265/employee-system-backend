@@ -8,8 +8,11 @@ import com.ruoyi.common.core.page.TableDataInfo;
 import com.ruoyi.common.utils.StringUtils;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -55,6 +58,12 @@ public class SqmsRecordController implements InitializingBean
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Value("${sqms.wechat.app-id:${WECHAT_APP_ID:}}")
+    private String wechatAppId;
+
+    @Value("${sqms.wechat.app-secret:${WECHAT_APP_SECRET:}}")
+    private String wechatAppSecret;
 
     @Override
     public void afterPropertiesSet()
@@ -225,6 +234,73 @@ public class SqmsRecordController implements InitializingBean
         return AjaxResult.error("手机号未注册");
     }
 
+    @PostMapping("/auth/login/wechat")
+    public AjaxResult wechatLogin(@RequestBody Map<String, Object> body)
+    {
+        String role = asString(body.get("role"));
+        String code = asString(body.get("code"));
+        String phone = asString(body.get("phone"));
+        String password = asString(body.get("password"));
+        String table = "customer".equals(role) ? "customers" : "employees";
+
+        if (StringUtils.isEmpty(code))
+        {
+            return AjaxResult.error("缺少微信登录 code");
+        }
+
+        Map<String, Object> wechatSession = requestWechatSession(code);
+        if (wechatSession.containsKey("error"))
+        {
+            return AjaxResult.error(asString(wechatSession.get("error")));
+        }
+
+        String openid = asString(wechatSession.get("openid"));
+        String unionid = asString(wechatSession.get("unionid"));
+        if (StringUtils.isEmpty(openid))
+        {
+            return AjaxResult.error("微信登录失败，未获取到 openid");
+        }
+
+        for (Map<String, Object> user : loadTable(table))
+        {
+            if (openid.equals(asString(user.get("wechatOpenid"))))
+            {
+                return loginResult(table, user);
+            }
+        }
+
+        if (StringUtils.isEmpty(phone) || StringUtils.isEmpty(password))
+        {
+            return AjaxResult.error("首次微信登录请先输入手机号和密码完成绑定");
+        }
+
+        for (Map<String, Object> user : loadTable(table))
+        {
+            if (phone.equals(asString(user.get("phone"))))
+            {
+                if (!password.equals(asString(user.get("password"))))
+                {
+                    return AjaxResult.error("密码错误");
+                }
+                AjaxResult validation = validateLoginUser(table, user);
+                if (validation != null)
+                {
+                    return validation;
+                }
+                user.put("wechatOpenid", openid);
+                if (!StringUtils.isEmpty(unionid))
+                {
+                    user.put("wechatUnionid", unionid);
+                }
+                user.put("wechatBindTime", System.currentTimeMillis());
+                upsert(table, user);
+                return loginResult(table, user);
+            }
+        }
+
+        return AjaxResult.error("手机号未注册");
+    }
+
     @PostMapping("/auth/register")
     public AjaxResult register(@RequestBody Map<String, Object> body)
     {
@@ -246,6 +322,86 @@ public class SqmsRecordController implements InitializingBean
         customer.put("ownerId", "");
         customer.put("approved", false);
         return AjaxResult.success(sanitizeUser(upsert("customers", customer)));
+    }
+
+    private Map<String, Object> requestWechatSession(String code)
+    {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (StringUtils.isEmpty(wechatAppId) || StringUtils.isEmpty(wechatAppSecret))
+        {
+            result.put("error", "服务器未配置微信小程序 AppID/AppSecret");
+            return result;
+        }
+
+        String url = UriComponentsBuilder.fromHttpUrl("https://api.weixin.qq.com/sns/jscode2session")
+                .queryParam("appid", wechatAppId)
+                .queryParam("secret", wechatAppSecret)
+                .queryParam("js_code", code)
+                .queryParam("grant_type", "authorization_code")
+                .build()
+                .toUriString();
+
+        try
+        {
+            String response = new RestTemplate().getForObject(url, String.class);
+            if (StringUtils.isEmpty(response))
+            {
+                result.put("error", "微信登录服务未返回数据");
+                return result;
+            }
+            JSONObject json = JSON.parseObject(response);
+            if (json == null)
+            {
+                result.put("error", "微信登录服务返回数据异常");
+                return result;
+            }
+            Integer errcode = json.getInteger("errcode");
+            if (errcode != null && errcode != 0)
+            {
+                result.put("error", "微信登录失败：" + json.getString("errmsg"));
+                return result;
+            }
+            result.put("openid", json.getString("openid"));
+            result.put("unionid", json.getString("unionid"));
+            return result;
+        }
+        catch (Exception e)
+        {
+            result.put("error", "微信登录服务请求失败");
+            return result;
+        }
+    }
+
+    private AjaxResult loginResult(String table, Map<String, Object> user)
+    {
+        AjaxResult validation = validateLoginUser(table, user);
+        if (validation != null)
+        {
+            return validation;
+        }
+
+        String userRole = "customers".equals(table) ? "customer" : asString(user.get("role"));
+        Map<String, Object> session = new LinkedHashMap<>();
+        session.put("role", StringUtils.isEmpty(userRole) ? "employee" : userRole);
+        session.put("id", user.get("_id"));
+        session.put("name", user.get("name"));
+        AjaxResult result = AjaxResult.success();
+        result.put("session", session);
+        result.put("user", sanitizeUser(user));
+        return result;
+    }
+
+    private AjaxResult validateLoginUser(String table, Map<String, Object> user)
+    {
+        if ("customers".equals(table) && !Boolean.TRUE.equals(user.get("approved")))
+        {
+            return AjaxResult.error("账号待管理员审核通过");
+        }
+        if (Boolean.TRUE.equals(user.get("disabled")))
+        {
+            return AjaxResult.error("账号已停用");
+        }
+        return null;
     }
 
     private List<Map<String, Object>> filterRows(String table, Map<String, String> query)
@@ -389,6 +545,8 @@ public class SqmsRecordController implements InitializingBean
     {
         Map<String, Object> sanitized = new LinkedHashMap<>(user);
         sanitized.remove("password");
+        sanitized.remove("wechatOpenid");
+        sanitized.remove("wechatUnionid");
         return sanitized;
     }
 

@@ -35,6 +35,8 @@ jobs:
       BACKEND_HEALTHCHECK_URL: ${{ secrets.BACKEND_HEALTHCHECK_URL }}
       DB_USERNAME: ${{ secrets.DB_USERNAME }}
       DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
+      WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
 
     steps:
       - name: Checkout
@@ -96,6 +98,8 @@ jobs:
           JAVA_OPTS_ARG="${BACKEND_JAVA_OPTS:-__EMPTY__}"
           DB_USERNAME_ARG="${DB_USERNAME:-__EMPTY__}"
           DB_PASSWORD_ARG="${DB_PASSWORD:-__EMPTY__}"
+          WECHAT_APP_ID_ARG="${WECHAT_APP_ID:-__EMPTY__}"
+          WECHAT_APP_SECRET_ARG="${WECHAT_APP_SECRET:-__EMPTY__}"
 
           "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- \
             "$DEPLOY_DIR" \
@@ -105,7 +109,9 @@ jobs:
             "$DB_USERNAME_ARG" \
             "$DB_PASSWORD_ARG" \
             "$JAVA_OPTS_ARG" \
-            "$RESTART_COMMAND_ARG" <<'EOF'
+            "$RESTART_COMMAND_ARG" \
+            "$WECHAT_APP_ID_ARG" \
+            "$WECHAT_APP_SECRET_ARG" <<'EOF'
           set -euo pipefail
           DEPLOY_DIR="${1:-}"
           RELEASE_JAR="${2:-}"
@@ -115,11 +121,15 @@ jobs:
           DB_PASSWORD="${6:-__EMPTY__}"
           JAVA_OPTS="${7:-__EMPTY__}"
           RESTART_COMMAND="${8:-__EMPTY__}"
+          WECHAT_APP_ID="${9:-__EMPTY__}"
+          WECHAT_APP_SECRET="${10:-__EMPTY__}"
 
           [ "$DB_USERNAME" = "__EMPTY__" ] && DB_USERNAME=""
           [ "$DB_PASSWORD" = "__EMPTY__" ] && DB_PASSWORD=""
           [ "$JAVA_OPTS" = "__EMPTY__" ] && JAVA_OPTS=""
           [ "$RESTART_COMMAND" = "__EMPTY__" ] && RESTART_COMMAND=""
+          [ "$WECHAT_APP_ID" = "__EMPTY__" ] && WECHAT_APP_ID=""
+          [ "$WECHAT_APP_SECRET" = "__EMPTY__" ] && WECHAT_APP_SECRET=""
 
           ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
           mkdir -p "$UPLOAD_DIR"
@@ -144,6 +154,12 @@ jobs:
             fi
             if [ -n "$DB_PASSWORD" ]; then
               APP_ARGS+=("--spring.datasource.druid.master.password=$DB_PASSWORD")
+            fi
+            if [ -n "$WECHAT_APP_ID" ]; then
+              APP_ARGS+=("--sqms.wechat.app-id=$WECHAT_APP_ID")
+            fi
+            if [ -n "$WECHAT_APP_SECRET" ]; then
+              APP_ARGS+=("--sqms.wechat.app-secret=$WECHAT_APP_SECRET")
             fi
 
             nohup java $JAVA_OPTS -jar "$DEPLOY_DIR/ruoyi-admin.jar" "${APP_ARGS[@]}" > "$DEPLOY_DIR/logs/app.log" 2>&1 &
