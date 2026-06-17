@@ -93,7 +93,8 @@ jobs:
           mkdir -p "$DEPLOY_DIR/releases" "$DEPLOY_DIR/logs"
           EOF
 
-          "${SCP_CMD[@]}" ruoyi-admin/target/ruoyi-admin.jar "$SSH_TARGET:$DEPLOY_DIR/releases/$RELEASE_JAR"
+          UPLOAD_TARGET="$(printf '%q' "$DEPLOY_DIR/releases/$RELEASE_JAR.gz")"
+          gzip -1 -c ruoyi-admin/target/ruoyi-admin.jar | "${SSH_CMD[@]}" "$SSH_TARGET" "cat > $UPLOAD_TARGET"
 
           RESTART_COMMAND_ARG="${BACKEND_RESTART_COMMAND:-__EMPTY__}"
           JAVA_OPTS_ARG="${BACKEND_JAVA_OPTS:-__EMPTY__}"
@@ -131,6 +132,11 @@ jobs:
           [ "$RESTART_COMMAND" = "__EMPTY__" ] && RESTART_COMMAND=""
           [ "$WECHAT_APP_ID" = "__EMPTY__" ] && WECHAT_APP_ID=""
           [ "$WECHAT_APP_SECRET" = "__EMPTY__" ] && WECHAT_APP_SECRET=""
+
+          if [ -f "$DEPLOY_DIR/releases/$RELEASE_JAR.gz" ]; then
+            gzip -dc "$DEPLOY_DIR/releases/$RELEASE_JAR.gz" > "$DEPLOY_DIR/releases/$RELEASE_JAR"
+            rm -f "$DEPLOY_DIR/releases/$RELEASE_JAR.gz"
+          fi
 
           ln -sfn "$DEPLOY_DIR/releases/$RELEASE_JAR" "$DEPLOY_DIR/ruoyi-admin.jar"
           mkdir -p "$UPLOAD_DIR"
