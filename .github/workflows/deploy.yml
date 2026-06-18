@@ -187,19 +187,28 @@ jobs:
               exit 1
             fi
             cp "$CURRENT_JAR_PATH" "$DEPLOY_DIR/releases/$RELEASE_JAR"
-            if command -v jar >/dev/null 2>&1; then
-              (cd "$PATCH_DIR" && jar uf "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_CLASS_ENTRY")
-            elif command -v python3 >/dev/null 2>&1; then
+            if command -v python3 >/dev/null 2>&1; then
               python3 - "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_DIR/$PATCH_CLASS_ENTRY" "$PATCH_CLASS_ENTRY" <<'PY'
+          import os
           import sys
           import zipfile
 
           jar_path, class_path, class_entry = sys.argv[1:]
+          tmp_path = jar_path + ".tmp"
           with open(class_path, "rb") as f:
-              data = f.read()
-          with zipfile.ZipFile(jar_path, "a", zipfile.ZIP_DEFLATED) as zf:
-              zf.writestr(class_entry, data)
+              class_bytes = f.read()
+          seen = set()
+          with zipfile.ZipFile(jar_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
+              for item in zin.infolist():
+                  if item.filename == class_entry or item.filename in seen:
+                      continue
+                  seen.add(item.filename)
+                  zout.writestr(item, zin.read(item.filename))
+              zout.writestr(class_entry, class_bytes)
+          os.replace(tmp_path, jar_path)
           PY
+            elif command -v jar >/dev/null 2>&1; then
+              (cd "$PATCH_DIR" && jar uf "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_CLASS_ENTRY")
             else
               echo "No jar or python3 command found to patch backend artifact."
               exit 1
@@ -221,51 +230,78 @@ jobs:
           mkdir -p "$UPLOAD_DIR"
 
           if [ -n "$RESTART_COMMAND" ]; then
-            bash -lc "$RESTART_COMMAND"
-          else
-            if [ -f "$DEPLOY_DIR/app.pid" ]; then
-              OLD_PID="$(cat "$DEPLOY_DIR/app.pid" || true)"
-              if [ -n "$OLD_PID" ]; then
-                kill "$OLD_PID" 2>/dev/null || true
-                sleep 5
-                kill -9 "$OLD_PID" 2>/dev/null || true
-              fi
-            fi
-            command -v fuser >/dev/null 2>&1 && fuser -k -n tcp "$APP_PORT" 2>/dev/null || true
-            sleep 2
+            echo "BACKEND_RESTART_COMMAND is configured, but this workflow uses the built-in restart to guarantee runtime secrets."
+          fi
 
-            APP_ARGS=("--server.port=$APP_PORT" "--ruoyi.profile=$UPLOAD_DIR")
-            if [ -n "$DB_USERNAME" ]; then
-              APP_ARGS+=("--spring.datasource.druid.master.username=$DB_USERNAME")
+          if [ -f "$DEPLOY_DIR/app.pid" ]; then
+            OLD_PID="$(cat "$DEPLOY_DIR/app.pid" || true)"
+            if [ -n "$OLD_PID" ]; then
+              kill "$OLD_PID" 2>/dev/null || true
+              sleep 3
+              kill -9 "$OLD_PID" 2>/dev/null || true
             fi
-            if [ -n "$DB_PASSWORD" ]; then
-              APP_ARGS+=("--spring.datasource.druid.master.password=$DB_PASSWORD")
-            fi
-            if [ -n "$WECHAT_APP_ID" ]; then
-              APP_ARGS+=("--sqms.wechat.app-id=$WECHAT_APP_ID")
-            fi
-            if [ -n "$WECHAT_APP_SECRET" ]; then
-              APP_ARGS+=("--sqms.wechat.app-secret=$WECHAT_APP_SECRET")
-            fi
+          fi
+          command -v fuser >/dev/null 2>&1 && fuser -k -n tcp "$APP_PORT" 2>/dev/null || true
+          if command -v lsof >/dev/null 2>&1; then
+            lsof -ti tcp:"$APP_PORT" | xargs -r kill -9 2>/dev/null || true
+          fi
+          pkill -f "$DEPLOY_DIR/ruoyi-admin.jar" 2>/dev/null || true
+          pkill -f "$DEPLOY_DIR/releases/ruoyi-admin-.*\\.jar" 2>/dev/null || true
+          sleep 2
 
-            JAVA_SYSTEM_PROPS=()
-            if [ -n "$WECHAT_APP_ID" ]; then
-              JAVA_SYSTEM_PROPS+=("-Dsqms.wechat.app-id=$WECHAT_APP_ID" "-DWECHAT_APP_ID=$WECHAT_APP_ID")
-            fi
-            if [ -n "$WECHAT_APP_SECRET" ]; then
-              JAVA_SYSTEM_PROPS+=("-Dsqms.wechat.app-secret=$WECHAT_APP_SECRET" "-DWECHAT_APP_SECRET=$WECHAT_APP_SECRET")
-            fi
+          APP_ARGS=("--server.port=$APP_PORT" "--ruoyi.profile=$UPLOAD_DIR")
+          if [ -n "$DB_USERNAME" ]; then
+            APP_ARGS+=("--spring.datasource.druid.master.username=$DB_USERNAME")
+          fi
+          if [ -n "$DB_PASSWORD" ]; then
+            APP_ARGS+=("--spring.datasource.druid.master.password=$DB_PASSWORD")
+          fi
+          if [ -n "$WECHAT_APP_ID" ]; then
+            APP_ARGS+=("--sqms.wechat.app-id=$WECHAT_APP_ID")
+          fi
+          if [ -n "$WECHAT_APP_SECRET" ]; then
+            APP_ARGS+=("--sqms.wechat.app-secret=$WECHAT_APP_SECRET")
+          fi
 
-            export WECHAT_APP_ID
-            export WECHAT_APP_SECRET
-            nohup java $JAVA_OPTS "${JAVA_SYSTEM_PROPS[@]}" -jar "$DEPLOY_DIR/ruoyi-admin.jar" "${APP_ARGS[@]}" < /dev/null > "$DEPLOY_DIR/logs/app.log" 2>&1 &
-            echo $! > "$DEPLOY_DIR/app.pid"
-            sleep 5
+          JAVA_SYSTEM_PROPS=()
+          if [ -n "$WECHAT_APP_ID" ]; then
+            JAVA_SYSTEM_PROPS+=("-Dsqms.wechat.app-id=$WECHAT_APP_ID" "-DWECHAT_APP_ID=$WECHAT_APP_ID")
+          fi
+          if [ -n "$WECHAT_APP_SECRET" ]; then
+            JAVA_SYSTEM_PROPS+=("-Dsqms.wechat.app-secret=$WECHAT_APP_SECRET" "-DWECHAT_APP_SECRET=$WECHAT_APP_SECRET")
+          fi
+
+          export WECHAT_APP_ID
+          export WECHAT_APP_SECRET
+          nohup java $JAVA_OPTS "${JAVA_SYSTEM_PROPS[@]}" -jar "$DEPLOY_DIR/ruoyi-admin.jar" "${APP_ARGS[@]}" < /dev/null > "$DEPLOY_DIR/logs/app.log" 2>&1 &
+          echo $! > "$DEPLOY_DIR/app.pid"
+
+          for _ in $(seq 1 60); do
             NEW_PID="$(cat "$DEPLOY_DIR/app.pid" || true)"
             if [ -z "$NEW_PID" ] || ! kill -0 "$NEW_PID" 2>/dev/null; then
               tail -n 120 "$DEPLOY_DIR/logs/app.log" || true
               exit 1
             fi
+            LOGIN_BODY="$(curl -sS -X POST "http://127.0.0.1:$APP_PORT/sqms/auth/login/wechat" -H 'Content-Type: application/json' -d '{"role":"employee","code":"codex-invalid-code"}' || true)"
+            BIND_STATUS="$(curl -sS -o /tmp/sqms-bind-check.txt -w '%{http_code}' -X POST "http://127.0.0.1:$APP_PORT/sqms/auth/wechat/bind" -H 'Content-Type: application/json' -d '{"role":"employee","phone":"__codex__","password":"__codex__","code":"codex-invalid-code"}' || true)"
+            if printf '%s' "$LOGIN_BODY" | grep -q 'AppID/AppSecret'; then
+              echo "Wechat runtime config is missing after restart."
+              exit 1
+            fi
+            if [ "$BIND_STATUS" = "404" ]; then
+              echo "Wechat bind endpoint is still missing after restart."
+              exit 1
+            fi
+            if printf '%s' "$LOGIN_BODY" | grep -Eq 'invalid code|invalid js_code'; then
+              echo "Backend started with WeChat config and bind endpoint."
+              break
+            fi
+            sleep 2
+          done
+          if ! printf '%s' "$LOGIN_BODY" | grep -Eq 'invalid code|invalid js_code'; then
+            echo "Backend did not pass WeChat runtime check."
+            tail -n 120 "$DEPLOY_DIR/logs/app.log" || true
+            exit 1
           fi
 
           ls -lh "$DEPLOY_DIR/ruoyi-admin.jar"

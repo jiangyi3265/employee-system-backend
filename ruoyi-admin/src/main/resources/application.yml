@@ -13,6 +13,12 @@ ruoyi:
   # 验证码类型 math 数字计算 char 字符验证
   captchaType: math
 
+# 微信小程序配置（销售报价系统微信登录/绑定使用）
+sqms:
+  wechat:
+    app-id: ${WECHAT_APP_ID:}
+    app-secret: ${WECHAT_APP_SECRET:}
+
 # 开发环境配置
 server:
   # 服务器的HTTP端口，默认为8080
