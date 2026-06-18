@@ -72,7 +72,7 @@ jobs:
           PATCH_CLASS_ENTRY="BOOT-INF/classes/com/ruoyi/web/controller/sqms/SqmsRecordController.class"
           PATCH_DIR="$DEPLOY_DIR/patches/$GITHUB_SHA"
           CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" || true)"
-          if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -vE '^(\.github/workflows/deploy\.yml|ruoyi-admin/src/main/java/com/ruoyi/web/controller/sqms/SqmsRecordController\.java)$' >/dev/null; then
+          if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -vE '^(\.github/workflows/deploy\.yml|ruoyi-admin/src/main/java/com/ruoyi/web/controller/sqms/SqmsRecordController\.java|ruoyi-admin/src/main/resources/application\.yml)$' >/dev/null; then
             REUSE_EXISTING_JAR=1
           fi
           if [ "$REUSE_EXISTING_JAR" = "1" ] && [ -f "$PATCH_CLASS_SOURCE" ]; then
