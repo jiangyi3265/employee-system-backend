@@ -56,6 +56,11 @@ public class SqmsRecordController implements InitializingBean
             "pageNum", "pageSize", "orderByColumn", "isAsc", "keyword", "_", "t"
     ));
 
+    // 微信绑定字段以服务端为权威，客户端同步不得覆盖清空
+    private static final Set<String> PROTECTED_WECHAT_FIELDS = new HashSet<>(Arrays.asList(
+            "wechatOpenid", "wechatUnionid", "wechatBindTime"
+    ));
+
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
@@ -237,12 +242,7 @@ public class SqmsRecordController implements InitializingBean
     @PostMapping("/auth/login/wechat")
     public AjaxResult wechatLogin(@RequestBody Map<String, Object> body)
     {
-        String role = asString(body.get("role"));
         String code = asString(body.get("code"));
-        String phone = asString(body.get("phone"));
-        String password = asString(body.get("password"));
-        String table = "customer".equals(role) ? "customers" : "employees";
-
         if (StringUtils.isEmpty(code))
         {
             return AjaxResult.error("缺少微信登录 code");
@@ -255,27 +255,102 @@ public class SqmsRecordController implements InitializingBean
         }
 
         String openid = asString(wechatSession.get("openid"));
-        String unionid = asString(wechatSession.get("unionid"));
         if (StringUtils.isEmpty(openid))
         {
             return AjaxResult.error("微信登录失败，未获取到 openid");
         }
 
-        for (Map<String, Object> user : loadTable(table))
+        // 一个微信只对应一个账号：跨员工/客户两表按 openid 全局查找，命中即一键登录
+        Account account = findAccountByOpenid(openid);
+        if (account != null)
         {
-            if (openid.equals(asString(user.get("wechatOpenid"))))
-            {
-                return loginResult(table, user);
-            }
+            return loginResult(account.table, account.user);
         }
+        return AjaxResult.error("该微信未绑定账号，请用手机号和密码登录后，在【我的】里绑定微信");
+    }
+
+    @PostMapping("/auth/wechat/bind")
+    public AjaxResult wechatBind(@RequestBody Map<String, Object> body)
+    {
+        String role = asString(body.get("role"));
+        String phone = asString(body.get("phone"));
+        String password = asString(body.get("password"));
+        String code = asString(body.get("code"));
+        String table = "customer".equals(role) ? "customers" : "employees";
 
         if (StringUtils.isEmpty(phone) || StringUtils.isEmpty(password))
         {
-            if ("customers".equals(table))
+            return AjaxResult.error("请输入手机号和密码");
+        }
+        if (StringUtils.isEmpty(code))
+        {
+            return AjaxResult.error("缺少微信登录 code");
+        }
+
+        Map<String, Object> wechatSession = requestWechatSession(code);
+        if (wechatSession.containsKey("error"))
+        {
+            return AjaxResult.error(asString(wechatSession.get("error")));
+        }
+        String openid = asString(wechatSession.get("openid"));
+        String unionid = asString(wechatSession.get("unionid"));
+        if (StringUtils.isEmpty(openid))
+        {
+            return AjaxResult.error("微信绑定失败，未获取到 openid");
+        }
+
+        // 校验要绑定的账号：手机号 + 密码
+        Map<String, Object> target = null;
+        for (Map<String, Object> user : loadTable(table))
+        {
+            if (phone.equals(asString(user.get("phone"))))
             {
-                return loginResult(table, createWechatCustomer(openid, unionid, body));
+                target = user;
+                break;
             }
-            return AjaxResult.error("首次微信登录请先输入手机号和密码完成绑定");
+        }
+        if (target == null)
+        {
+            return AjaxResult.error("手机号未注册");
+        }
+        if (!password.equals(asString(target.get("password"))))
+        {
+            return AjaxResult.error("密码错误");
+        }
+        AjaxResult validation = validateLoginUser(table, target);
+        if (validation != null)
+        {
+            return validation;
+        }
+
+        // 全局唯一校验：该微信若已绑在别的账号上则拒绝
+        Account bound = findAccountByOpenid(openid);
+        if (bound != null && !asString(bound.user.get("_id")).equals(asString(target.get("_id"))))
+        {
+            return AjaxResult.error("该微信已绑定其它账号，请先在原账号解绑后再绑定");
+        }
+
+        target.put("wechatOpenid", openid);
+        if (!StringUtils.isEmpty(unionid))
+        {
+            target.put("wechatUnionid", unionid);
+        }
+        target.put("wechatBindTime", System.currentTimeMillis());
+        upsert(table, target);
+        return loginResult(table, target);
+    }
+
+    @PostMapping("/auth/wechat/unbind")
+    public AjaxResult wechatUnbind(@RequestBody Map<String, Object> body)
+    {
+        String role = asString(body.get("role"));
+        String phone = asString(body.get("phone"));
+        String password = asString(body.get("password"));
+        String table = "customer".equals(role) ? "customers" : "employees";
+
+        if (StringUtils.isEmpty(phone) || StringUtils.isEmpty(password))
+        {
+            return AjaxResult.error("请输入手机号和密码确认解绑");
         }
 
         for (Map<String, Object> user : loadTable(table))
@@ -286,28 +361,36 @@ public class SqmsRecordController implements InitializingBean
                 {
                     return AjaxResult.error("密码错误");
                 }
-                AjaxResult validation = validateLoginUser(table, user);
-                if (validation != null)
-                {
-                    return validation;
-                }
-                user.put("wechatOpenid", openid);
-                if (!StringUtils.isEmpty(unionid))
-                {
-                    user.put("wechatUnionid", unionid);
-                }
-                user.put("wechatBindTime", System.currentTimeMillis());
-                upsert(table, user);
-                return loginResult(table, user);
+                user.remove("wechatOpenid");
+                user.remove("wechatUnionid");
+                user.remove("wechatBindTime");
+                upsert(table, user, false);
+                return AjaxResult.success("已解除微信绑定");
             }
         }
-
-        if ("customers".equals(table))
-        {
-            return loginResult(table, createWechatCustomer(openid, unionid, body));
-        }
-
         return AjaxResult.error("手机号未注册");
+    }
+
+    /** 管理员强制清除某账号的微信绑定（按表 + 记录ID），用于离职、绑错人、用户丢失账号等场景 */
+    @PostMapping("/auth/wechat/admin-unbind")
+    public AjaxResult wechatAdminUnbind(@RequestBody Map<String, Object> body)
+    {
+        String table = asString(body.get("table"));
+        String id = asString(body.get("id"));
+        if (!"employees".equals(table) && !"customers".equals(table))
+        {
+            return AjaxResult.error("仅支持清除员工/客户的微信绑定");
+        }
+        Map<String, Object> user = getRecord(table, id);
+        if (user == null)
+        {
+            return AjaxResult.error("记录不存在");
+        }
+        user.remove("wechatOpenid");
+        user.remove("wechatUnionid");
+        user.remove("wechatBindTime");
+        upsert(table, user, false);
+        return AjaxResult.success("已清除微信绑定");
     }
 
     @PostMapping("/auth/register")
@@ -333,25 +416,36 @@ public class SqmsRecordController implements InitializingBean
         return AjaxResult.success(sanitizeUser(upsert("customers", customer)));
     }
 
-    private Map<String, Object> createWechatCustomer(String openid, String unionid, Map<String, Object> body)
+    /** 跨 employees + customers 两表按 openid 查找已绑定账号，保证一个微信全局只对应一个账号 */
+    private Account findAccountByOpenid(String openid)
     {
-        Map<String, Object> customer = new LinkedHashMap<>();
-        String name = asString(body.get("name"));
-        customer.put("name", StringUtils.isEmpty(name) ? "微信客户" : name);
-        customer.put("phone", body.getOrDefault("phone", ""));
-        customer.put("password", body.getOrDefault("password", ""));
-        customer.put("company", body.getOrDefault("company", ""));
-        customer.put("grade", "C");
-        customer.put("pool", "public");
-        customer.put("ownerId", "");
-        customer.put("approved", true);
-        customer.put("wechatOpenid", openid);
-        if (!StringUtils.isEmpty(unionid))
+        if (StringUtils.isEmpty(openid))
         {
-            customer.put("wechatUnionid", unionid);
+            return null;
         }
-        customer.put("wechatBindTime", System.currentTimeMillis());
-        return upsert("customers", customer);
+        for (String t : new String[]{"employees", "customers"})
+        {
+            for (Map<String, Object> user : loadTable(t))
+            {
+                if (openid.equals(asString(user.get("wechatOpenid"))))
+                {
+                    return new Account(t, user);
+                }
+            }
+        }
+        return null;
+    }
+
+    private static class Account
+    {
+        final String table;
+        final Map<String, Object> user;
+
+        Account(String table, Map<String, Object> user)
+        {
+            this.table = table;
+            this.user = user;
+        }
     }
 
     private Map<String, Object> requestWechatSession(String code)
@@ -503,12 +597,46 @@ public class SqmsRecordController implements InitializingBean
 
     private Map<String, Object> upsert(String table, Map<String, Object> body)
     {
+        return upsert(table, body, true);
+    }
+
+    private Map<String, Object> upsert(String table, Map<String, Object> body, boolean protectWechat)
+    {
         long now = System.currentTimeMillis();
         String id = asString(body.get("_id"));
         if (StringUtils.isEmpty(id))
         {
             id = table + "_" + Long.toString(now, 36) + Integer.toString(Math.abs(body.hashCode()), 36);
             body.put("_id", id);
+        }
+        if ("employees".equals(table) || "customers".equals(table))
+        {
+            // 微信绑定字段以服务端为权威：写入若缺失或为空值，保留库中已有值，避免被整条覆盖清空（仅 protectWechat）
+            if (protectWechat)
+            {
+                Map<String, Object> existing = getRecord(table, id);
+                if (existing != null)
+                {
+                    for (String field : PROTECTED_WECHAT_FIELDS)
+                    {
+                        boolean bodyHasValue = body.containsKey(field) && !StringUtils.isEmpty(asString(body.get(field)));
+                        if (!bodyHasValue && !StringUtils.isEmpty(asString(existing.get(field))))
+                        {
+                            body.put(field, existing.get(field));
+                        }
+                    }
+                }
+            }
+            // 一个微信全局只绑一个账号：写入携带 openid 时，若已属于其它账号则拒绝（堵住绑定接口以外的写路径）
+            String openid = asString(body.get("wechatOpenid"));
+            if (!StringUtils.isEmpty(openid))
+            {
+                Account owner = findAccountByOpenid(openid);
+                if (owner != null && !asString(owner.user.get("_id")).equals(id))
+                {
+                    throw new IllegalArgumentException("该微信已被其它账号绑定，不能重复绑定");
+                }
+            }
         }
         body.putIfAbsent("createTime", now);
         body.put("updateTime", now);
@@ -536,7 +664,7 @@ public class SqmsRecordController implements InitializingBean
     {
         if (incomingIds.isEmpty())
         {
-            jdbcTemplate.update("DELETE FROM sqms_record WHERE table_name = ?", table);
+            // 安全保护：本次未上报任何记录时不清空整表，避免误删（含已绑微信的账号）
             return;
         }
 
