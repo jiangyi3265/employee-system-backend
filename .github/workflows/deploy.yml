@@ -68,14 +68,17 @@ jobs:
           SSH_TARGET="${SSH_USER}@${SSH_HOST}"
           REUSE_EXISTING_JAR=0
           CLASS_PATCH=0
-          PATCH_CLASS_SOURCE="ruoyi-admin/target/classes/com/ruoyi/web/controller/sqms/SqmsRecordController.class"
-          PATCH_CLASS_ENTRY="BOOT-INF/classes/com/ruoyi/web/controller/sqms/SqmsRecordController.class"
+          PATCH_CLASS_ROOT="ruoyi-admin/target/classes"
+          PATCH_CLASS_REL_DIR="com/ruoyi/web/controller/sqms"
+          PATCH_CLASS_ENTRY_DIR="BOOT-INF/classes/$PATCH_CLASS_REL_DIR"
           PATCH_DIR="$DEPLOY_DIR/patches/$GITHUB_SHA"
+          PATCH_ARCHIVE="$(mktemp)"
           CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" || true)"
           if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -vE '^(\.github/workflows/deploy\.yml|ruoyi-admin/src/main/java/com/ruoyi/web/controller/sqms/SqmsRecordController\.java|ruoyi-admin/src/main/resources/application\.yml)$' >/dev/null; then
             REUSE_EXISTING_JAR=1
           fi
-          if [ "$REUSE_EXISTING_JAR" = "1" ] && [ -f "$PATCH_CLASS_SOURCE" ]; then
+          PATCH_CLASS_FILES=("$PATCH_CLASS_ROOT/$PATCH_CLASS_REL_DIR"/SqmsRecordController*.class)
+          if [ "$REUSE_EXISTING_JAR" = "1" ] && [ -f "${PATCH_CLASS_FILES[0]}" ]; then
             CLASS_PATCH=1
           fi
 
@@ -108,15 +111,21 @@ jobs:
           EOF
 
           if [ "$CLASS_PATCH" = "1" ]; then
-            echo "Only patchable backend files changed; patching backend class into existing server jar."
-            PATCH_CLASS_TARGET="$(printf '%q' "$PATCH_DIR/$PATCH_CLASS_ENTRY")"
-            "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- "$PATCH_DIR" "$PATCH_CLASS_ENTRY" <<'EOF'
+            echo "Only patchable backend files changed; patching backend classes into existing server jar."
+            tar -C "$PATCH_CLASS_ROOT" -czf "$PATCH_ARCHIVE" "$PATCH_CLASS_REL_DIR"/SqmsRecordController*.class
+            PATCH_ARCHIVE_TARGET="$(printf '%q' "$PATCH_DIR/controller-classes.tar.gz")"
+            "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- "$PATCH_DIR" <<'EOF'
           set -euo pipefail
           PATCH_DIR="$1"
-          PATCH_CLASS_ENTRY="$2"
-          mkdir -p "$PATCH_DIR/$(dirname "$PATCH_CLASS_ENTRY")"
+          mkdir -p "$PATCH_DIR/BOOT-INF/classes"
           EOF
-            timeout 120 "${SSH_CMD[@]}" "$SSH_TARGET" "cat > $PATCH_CLASS_TARGET" < "$PATCH_CLASS_SOURCE"
+            timeout 120 "${SSH_CMD[@]}" "$SSH_TARGET" "cat > $PATCH_ARCHIVE_TARGET" < "$PATCH_ARCHIVE"
+            "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- "$PATCH_DIR" <<'EOF'
+          set -euo pipefail
+          PATCH_DIR="$1"
+          tar -C "$PATCH_DIR/BOOT-INF/classes" -xzf "$PATCH_DIR/controller-classes.tar.gz"
+          find "$PATCH_DIR/BOOT-INF/classes/com/ruoyi/web/controller/sqms" -name 'SqmsRecordController*.class' -type f
+          EOF
           elif [ "$REUSE_EXISTING_JAR" = "1" ]; then
             echo "Only deployment workflow changed; reusing existing backend artifact on server."
           else
@@ -156,7 +165,7 @@ jobs:
             "$REUSE_EXISTING_JAR" \
             "$CLASS_PATCH" \
             "$PATCH_DIR" \
-            "$PATCH_CLASS_ENTRY" <<'EOF'
+            "$PATCH_CLASS_ENTRY_DIR" <<'EOF'
           set -euo pipefail
           DEPLOY_DIR="${1:-}"
           RELEASE_JAR="${2:-}"
@@ -171,7 +180,7 @@ jobs:
           REUSE_EXISTING_JAR="${11:-0}"
           CLASS_PATCH="${12:-0}"
           PATCH_DIR="${13:-}"
-          PATCH_CLASS_ENTRY="${14:-}"
+          PATCH_CLASS_ENTRY_DIR="${14:-}"
 
           [ "$DB_USERNAME" = "__EMPTY__" ] && DB_USERNAME=""
           [ "$DB_PASSWORD" = "__EMPTY__" ] && DB_PASSWORD=""
@@ -188,27 +197,39 @@ jobs:
             fi
             cp "$CURRENT_JAR_PATH" "$DEPLOY_DIR/releases/$RELEASE_JAR"
             if command -v python3 >/dev/null 2>&1; then
-              python3 - "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_DIR/$PATCH_CLASS_ENTRY" "$PATCH_CLASS_ENTRY" <<'PY'
+              python3 - "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_DIR" "$PATCH_CLASS_ENTRY_DIR" <<'PY'
           import os
           import sys
           import zipfile
 
-          jar_path, class_path, class_entry = sys.argv[1:]
+          jar_path, patch_dir, class_entry_dir = sys.argv[1:]
           tmp_path = jar_path + ".tmp"
-          with open(class_path, "rb") as f:
-              class_bytes = f.read()
+          patch_base = os.path.join(patch_dir, class_entry_dir)
+          patch_files = []
+          for root, _, files in os.walk(patch_base):
+              for name in files:
+                  if not name.endswith(".class"):
+                      continue
+                  path = os.path.join(root, name)
+                  entry = os.path.relpath(path, patch_dir).replace(os.sep, "/")
+                  patch_files.append((entry, path))
+          if not patch_files:
+              raise SystemExit("No patch class files found")
+          patch_entries = {entry for entry, _ in patch_files}
           seen = set()
           with zipfile.ZipFile(jar_path, "r") as zin, zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zout:
               for item in zin.infolist():
-                  if item.filename == class_entry or item.filename in seen:
+                  if item.filename in patch_entries or item.filename in seen:
                       continue
                   seen.add(item.filename)
                   zout.writestr(item, zin.read(item.filename))
-              zout.writestr(class_entry, class_bytes)
+              for entry, path in patch_files:
+                  with open(path, "rb") as f:
+                      zout.writestr(entry, f.read())
           os.replace(tmp_path, jar_path)
           PY
             elif command -v jar >/dev/null 2>&1; then
-              (cd "$PATCH_DIR" && jar uf "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_CLASS_ENTRY")
+              (cd "$PATCH_DIR" && jar uf "$DEPLOY_DIR/releases/$RELEASE_JAR" "$PATCH_CLASS_ENTRY_DIR"/SqmsRecordController*.class)
             else
               echo "No jar or python3 command found to patch backend artifact."
               exit 1
