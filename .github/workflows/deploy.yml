@@ -78,6 +78,10 @@ jobs:
             REUSE_EXISTING_JAR=1
           fi
           PATCH_CLASS_FILES=("$PATCH_CLASS_ROOT/$PATCH_CLASS_REL_DIR"/SqmsRecordController*.class)
+          PATCH_CLASS_REL_FILES=()
+          for file in "${PATCH_CLASS_FILES[@]}"; do
+            PATCH_CLASS_REL_FILES+=("${file#$PATCH_CLASS_ROOT/}")
+          done
           if [ "$REUSE_EXISTING_JAR" = "1" ] && [ -f "${PATCH_CLASS_FILES[0]}" ]; then
             CLASS_PATCH=1
           fi
@@ -112,7 +116,7 @@ jobs:
 
           if [ "$CLASS_PATCH" = "1" ]; then
             echo "Only patchable backend files changed; patching backend classes into existing server jar."
-            tar -C "$PATCH_CLASS_ROOT" -czf "$PATCH_ARCHIVE" "$PATCH_CLASS_REL_DIR"/SqmsRecordController*.class
+            tar -C "$PATCH_CLASS_ROOT" -czf "$PATCH_ARCHIVE" "${PATCH_CLASS_REL_FILES[@]}"
             PATCH_ARCHIVE_TARGET="$(printf '%q' "$PATCH_DIR/controller-classes.tar.gz")"
             "${SSH_CMD[@]}" "$SSH_TARGET" 'bash -s' -- "$PATCH_DIR" <<'EOF'
           set -euo pipefail
