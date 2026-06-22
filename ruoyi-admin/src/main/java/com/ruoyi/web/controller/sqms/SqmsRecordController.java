@@ -48,7 +48,8 @@ public class SqmsRecordController implements InitializingBean
     private static final List<String> TABLES = Arrays.asList(
             "employees", "customers", "suppliers", "competitors", "products",
             "quoteOrders", "quoteItems", "competitorQuotes", "follows",
-            "purchaseOrders", "purchaseItems", "requestOrders", "requestItems",
+            "purchaseOrders", "purchaseItems", "purchaseRequests", "purchaseRequestItems",
+            "requestOrders", "requestItems",
             "suggestions", "messages", "settings"
     );
 
