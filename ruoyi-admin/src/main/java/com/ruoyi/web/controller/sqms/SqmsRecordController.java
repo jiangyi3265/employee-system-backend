@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.function.Predicate;
 
 /**
  * SQMS business data API.
@@ -140,13 +141,20 @@ public class SqmsRecordController implements InitializingBean
     }
 
     @DeleteMapping("/{table}/{ids}")
+    @Transactional(rollbackFor = Exception.class)
     public AjaxResult remove(@PathVariable String table, @PathVariable String ids)
     {
         checkTable(table);
         int count = 0;
         for (String id : ids.split(","))
         {
-            count += jdbcTemplate.update("DELETE FROM sqms_record WHERE table_name = ? AND record_id = ?", table, id);
+            String recordId = id == null ? "" : id.trim();
+            if (StringUtils.isEmpty(recordId))
+            {
+                continue;
+            }
+            count += cascadeDelete(table, recordId);
+            count += deleteRecordById(table, recordId);
         }
         return AjaxResult.success(count);
     }
@@ -659,6 +667,134 @@ public class SqmsRecordController implements InitializingBean
     {
         return jdbcTemplate.query("SELECT record_json FROM sqms_record WHERE table_name = ?",
                 (rs, rowNum) -> parseRecord(rs.getString("record_json")), table);
+    }
+
+    private int cascadeDelete(String table, String id)
+    {
+        if ("customers".equals(table))
+        {
+            return cascadeDeleteCustomer(id);
+        }
+        if ("competitors".equals(table))
+        {
+            return cascadeDeleteCompetitor(id);
+        }
+        return 0;
+    }
+
+    private int cascadeDeleteCustomer(String customerId)
+    {
+        Set<String> quoteOrderIds = loadRecordIds("quoteOrders", row -> fieldEquals(row, "customerId", customerId));
+        Set<String> quoteItemIds = loadRecordIds("quoteItems", row ->
+                fieldEquals(row, "customerId", customerId) || idSetContains(quoteOrderIds, row.get("orderId")));
+        Set<String> requestOrderIds = loadRecordIds("requestOrders", row -> fieldEquals(row, "customerId", customerId));
+        Set<String> requestItemIds = loadRecordIds("requestItems", row ->
+                fieldEquals(row, "customerId", customerId) ||
+                        idSetContains(requestOrderIds, row.get("requestOrderId")) ||
+                        idSetContains(requestOrderIds, row.get("requestId")));
+        Set<String> followIds = loadRecordIds("follows", row ->
+                fieldEquals(row, "customerId", customerId) ||
+                        idSetContains(quoteOrderIds, row.get("orderId")) ||
+                        idSetContains(quoteOrderIds, row.get("relatedOrderId")));
+        Set<String> suggestionIds = loadRecordIds("suggestions", row -> fieldEquals(row, "customerId", customerId));
+        Set<String> competitorQuoteIds = loadRecordIds("competitorQuotes", row ->
+                fieldEquals(row, "sourceCustomerId", customerId) || fieldEquals(row, "customerId", customerId));
+
+        Set<String> relatedIds = new HashSet<>();
+        relatedIds.addAll(quoteOrderIds);
+        relatedIds.addAll(quoteItemIds);
+        relatedIds.addAll(requestOrderIds);
+        relatedIds.addAll(requestItemIds);
+        relatedIds.addAll(suggestionIds);
+        relatedIds.addAll(competitorQuoteIds);
+        Set<String> messageIds = loadRecordIds("messages", row ->
+                fieldEquals(row, "fromId", customerId) ||
+                        fieldEquals(row, "toId", customerId) ||
+                        idSetContains(relatedIds, row.get("refId")));
+
+        int count = 0;
+        count += deleteRecordsByIds("messages", messageIds);
+        count += deleteRecordsByIds("follows", followIds);
+        count += deleteRecordsByIds("competitorQuotes", competitorQuoteIds);
+        count += deleteRecordsByIds("quoteItems", quoteItemIds);
+        count += deleteRecordsByIds("quoteOrders", quoteOrderIds);
+        count += deleteRecordsByIds("requestItems", requestItemIds);
+        count += deleteRecordsByIds("requestOrders", requestOrderIds);
+        count += deleteRecordsByIds("suggestions", suggestionIds);
+        return count;
+    }
+
+    private int cascadeDeleteCompetitor(String competitorId)
+    {
+        Map<String, Object> competitor = getRecord("competitors", competitorId);
+        String competitorName = competitor == null ? "" : asString(competitor.get("name"));
+        Set<String> competitorQuoteIds = loadRecordIds("competitorQuotes", row ->
+                fieldEquals(row, "competitorId", competitorId) ||
+                        (StringUtils.isEmpty(asString(row.get("competitorId"))) &&
+                                !StringUtils.isEmpty(competitorName) &&
+                                competitorName.equals(asString(row.get("competitorName")))));
+        return deleteRecordsByIds("competitorQuotes", competitorQuoteIds);
+    }
+
+    private Set<String> loadRecordIds(String table, Predicate<Map<String, Object>> matcher)
+    {
+        List<Map<String, Object>> rows = jdbcTemplate.query(
+                "SELECT record_id, record_json FROM sqms_record WHERE table_name = ?",
+                (rs, rowNum) -> {
+                    Map<String, Object> record = parseRecord(rs.getString("record_json"));
+                    record.put("_recordId", rs.getString("record_id"));
+                    return record;
+                },
+                table);
+        Set<String> ids = new HashSet<>();
+        for (Map<String, Object> row : rows)
+        {
+            if (matcher.test(row))
+            {
+                String id = asString(row.get("_recordId"));
+                if (!StringUtils.isEmpty(id))
+                {
+                    ids.add(id);
+                }
+            }
+        }
+        return ids;
+    }
+
+    private int deleteRecordsByIds(String table, Set<String> ids)
+    {
+        if (ids.isEmpty())
+        {
+            return 0;
+        }
+        String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
+        List<Object> args = new ArrayList<>();
+        args.add(table);
+        args.addAll(ids);
+        return jdbcTemplate.update("DELETE FROM sqms_record WHERE table_name = ? AND record_id IN (" + placeholders + ")",
+                args.toArray());
+    }
+
+    private int deleteRecordById(String table, String id)
+    {
+        return jdbcTemplate.update("DELETE FROM sqms_record WHERE table_name = ? AND record_id = ?", table, id);
+    }
+
+    private boolean fieldEquals(Map<String, Object> row, String field, String id)
+    {
+        return sameId(row.get(field), id);
+    }
+
+    private boolean idSetContains(Set<String> ids, Object value)
+    {
+        String id = asString(value);
+        return !StringUtils.isEmpty(id) && ids.contains(id);
+    }
+
+    private boolean sameId(Object value, String id)
+    {
+        String text = asString(value);
+        return !StringUtils.isEmpty(id) && id.equals(text);
     }
 
     private void deleteMissingRecords(String table, Set<String> incomingIds)
