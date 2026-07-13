@@ -183,6 +183,7 @@ public class SqmsRecordController implements InitializingBean
         }
         Map<String, Object> tables = (Map<String, Object>) tablesObj;
         int count = 0;
+        // A sync request contains this client's mutations, not a full-table snapshot.
         for (Map.Entry<String, Object> entry : tables.entrySet())
         {
             String table = entry.getKey();
@@ -192,17 +193,39 @@ public class SqmsRecordController implements InitializingBean
                 continue;
             }
             List<?> records = (List<?>) entry.getValue();
-            Set<String> incomingIds = new HashSet<>();
             for (Object record : records)
             {
                 if (record instanceof Map)
                 {
-                    Map<String, Object> saved = upsert(table, new LinkedHashMap<>((Map<String, Object>) record));
-                    incomingIds.add(asString(saved.get("_id")));
+                    upsert(table, new LinkedHashMap<>((Map<String, Object>) record));
                     count++;
                 }
             }
-            deleteMissingRecords(table, incomingIds);
+        }
+
+        Object deletionsObj = payload.get("deletions");
+        if (deletionsObj instanceof Map)
+        {
+            Map<String, Object> deletions = (Map<String, Object>) deletionsObj;
+            for (Map.Entry<String, Object> entry : deletions.entrySet())
+            {
+                String table = entry.getKey();
+                checkTable(table);
+                if (!(entry.getValue() instanceof List))
+                {
+                    continue;
+                }
+                for (Object idValue : (List<?>) entry.getValue())
+                {
+                    String recordId = asString(idValue).trim();
+                    if (StringUtils.isEmpty(recordId))
+                    {
+                        continue;
+                    }
+                    count += cascadeDelete(table, recordId);
+                    count += deleteRecordById(table, recordId);
+                }
+            }
         }
         AjaxResult result = AjaxResult.success();
         result.put("count", count);
@@ -795,22 +818,6 @@ public class SqmsRecordController implements InitializingBean
     {
         String text = asString(value);
         return !StringUtils.isEmpty(id) && id.equals(text);
-    }
-
-    private void deleteMissingRecords(String table, Set<String> incomingIds)
-    {
-        if (incomingIds.isEmpty())
-        {
-            // 安全保护：本次未上报任何记录时不清空整表，避免误删（含已绑微信的账号）
-            return;
-        }
-
-        String placeholders = String.join(",", Collections.nCopies(incomingIds.size(), "?"));
-        List<Object> args = new ArrayList<>();
-        args.add(table);
-        args.addAll(incomingIds);
-        jdbcTemplate.update("DELETE FROM sqms_record WHERE table_name = ? AND record_id NOT IN (" + placeholders + ")",
-                args.toArray());
     }
 
     private Map<String, Object> parseRecord(String json)
