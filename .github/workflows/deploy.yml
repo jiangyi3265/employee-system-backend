@@ -310,8 +310,9 @@ jobs:
             LOGIN_BODY="$(curl -sS -X POST "http://127.0.0.1:$APP_PORT/sqms/auth/login/wechat" -H 'Content-Type: application/json' -d '{"role":"employee","code":"codex-invalid-code"}' || true)"
             BIND_STATUS="$(curl -sS -o /tmp/sqms-bind-check.txt -w '%{http_code}' -X POST "http://127.0.0.1:$APP_PORT/sqms/auth/wechat/bind" -H 'Content-Type: application/json' -d '{"role":"employee","phone":"__codex__","password":"__codex__","code":"codex-invalid-code"}' || true)"
             if printf '%s' "$LOGIN_BODY" | grep -q 'AppID/AppSecret'; then
-              echo "Wechat runtime config is missing after restart."
-              exit 1
+              echo "Wechat runtime config is not ready yet; retrying."
+              sleep 2
+              continue
             fi
             if [ "$BIND_STATUS" = "404" ]; then
               echo "Wechat bind endpoint is still missing after restart."
