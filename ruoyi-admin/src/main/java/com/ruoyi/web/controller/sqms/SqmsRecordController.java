@@ -720,16 +720,12 @@ public class SqmsRecordController implements InitializingBean
                         idSetContains(quoteOrderIds, row.get("orderId")) ||
                         idSetContains(quoteOrderIds, row.get("relatedOrderId")));
         Set<String> suggestionIds = loadRecordIds("suggestions", row -> fieldEquals(row, "customerId", customerId));
-        Set<String> competitorQuoteIds = loadRecordIds("competitorQuotes", row ->
-                fieldEquals(row, "sourceCustomerId", customerId) || fieldEquals(row, "customerId", customerId));
-
         Set<String> relatedIds = new HashSet<>();
         relatedIds.addAll(quoteOrderIds);
         relatedIds.addAll(quoteItemIds);
         relatedIds.addAll(requestOrderIds);
         relatedIds.addAll(requestItemIds);
         relatedIds.addAll(suggestionIds);
-        relatedIds.addAll(competitorQuoteIds);
         Set<String> messageIds = loadRecordIds("messages", row ->
                 fieldEquals(row, "fromId", customerId) ||
                         fieldEquals(row, "toId", customerId) ||
@@ -738,7 +734,6 @@ public class SqmsRecordController implements InitializingBean
         int count = 0;
         count += deleteRecordsByIds("messages", messageIds);
         count += deleteRecordsByIds("follows", followIds);
-        count += deleteRecordsByIds("competitorQuotes", competitorQuoteIds);
         count += deleteRecordsByIds("quoteItems", quoteItemIds);
         count += deleteRecordsByIds("quoteOrders", quoteOrderIds);
         count += deleteRecordsByIds("requestItems", requestItemIds);
