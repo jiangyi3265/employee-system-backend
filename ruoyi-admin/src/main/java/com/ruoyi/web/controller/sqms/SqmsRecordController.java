@@ -643,10 +643,24 @@ public class SqmsRecordController implements InitializingBean
         }
         if ("employees".equals(table) || "customers".equals(table))
         {
+            Map<String, Object> existing = getRecord(table, id);
+            String password = asString(body.get("password"));
+            if (StringUtils.isEmpty(password))
+            {
+                if (existing != null && !StringUtils.isEmpty(asString(existing.get("password"))))
+                {
+                    body.put("password", existing.get("password"));
+                }
+                else
+                {
+                    throw new IllegalArgumentException("employees".equals(table)
+                            ? "新增员工必须设置登录密码"
+                            : "新增客户必须设置登录密码");
+                }
+            }
             // 微信绑定字段以服务端为权威：写入若缺失或为空值，保留库中已有值，避免被整条覆盖清空（仅 protectWechat）
             if (protectWechat)
             {
-                Map<String, Object> existing = getRecord(table, id);
                 if (existing != null)
                 {
                     for (String field : PROTECTED_WECHAT_FIELDS)
