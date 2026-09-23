@@ -33,6 +33,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.function.Predicate;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 
 /**
  * SQMS business data API.
@@ -126,6 +128,7 @@ public class SqmsRecordController implements InitializingBean
     }
 
     @PostMapping("/{table}")
+    @Transactional(rollbackFor = Exception.class)
     public AjaxResult add(@PathVariable String table, @RequestBody Map<String, Object> body)
     {
         checkTable(table);
@@ -133,6 +136,7 @@ public class SqmsRecordController implements InitializingBean
     }
 
     @PutMapping("/{table}/{id}")
+    @Transactional(rollbackFor = Exception.class)
     public AjaxResult edit(@PathVariable String table, @PathVariable String id, @RequestBody Map<String, Object> body)
     {
         checkTable(table);
@@ -231,6 +235,152 @@ public class SqmsRecordController implements InitializingBean
         result.put("count", count);
         result.put("serverTime", System.currentTimeMillis());
         return result;
+    }
+
+    /** Serialize stock-in on the server so two devices cannot overwrite each other's inventory. */
+    @PostMapping("/purchase/stock-in")
+    @Transactional(rollbackFor = Exception.class)
+    public AjaxResult stockInPurchase(@RequestBody Map<String, Object> body)
+    {
+        String orderId = asString(body.get("orderId")).trim();
+        if (StringUtils.isEmpty(orderId))
+        {
+            return AjaxResult.error("缺少采购单编号");
+        }
+        Map<String, Object> order = getRecordForUpdate("purchaseOrders", orderId);
+        if (order == null)
+        {
+            return AjaxResult.error("采购单不存在");
+        }
+        if (asLong(order.get("stockInTime")) > 0)
+        {
+            return AjaxResult.success(order);
+        }
+        if (!"purchased".equals(asString(order.get("status"))))
+        {
+            return AjaxResult.error("只有已采购的预采购单可以入库");
+        }
+
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (Map<String, Object> item : loadTableForUpdate("purchaseItems"))
+        {
+            if (orderId.equals(asString(item.get("purchaseOrderId"))))
+            {
+                items.add(item);
+            }
+        }
+        if (items.isEmpty())
+        {
+            return AjaxResult.error("采购单没有明细");
+        }
+
+        Set<String> productIds = new HashSet<>();
+        for (Map<String, Object> item : items)
+        {
+            String productId = asString(item.get("productId"));
+            if (StringUtils.isEmpty(asString(item.get("_id"))) || StringUtils.isEmpty(productId) ||
+                    decimal(item.get("qty")).compareTo(BigDecimal.ZERO) <= 0)
+            {
+                return AjaxResult.error("采购明细的商品或数量无效");
+            }
+            if (asLong(item.get("stockInTime")) > 0)
+            {
+                return AjaxResult.error("采购单存在已入库明细，请先核对库存");
+            }
+            productIds.add(productId);
+        }
+        List<String> sortedProductIds = new ArrayList<>(productIds);
+        Collections.sort(sortedProductIds);
+        Map<String, Map<String, Object>> products = new LinkedHashMap<>();
+        for (String productId : sortedProductIds)
+        {
+            Map<String, Object> product = getRecordForUpdate("products", productId);
+            if (product == null)
+            {
+                return AjaxResult.error("采购商品不存在，无法入库");
+            }
+            products.put(productId, product);
+        }
+
+        Map<String, BigDecimal> increments = new HashMap<>();
+        Map<String, BigDecimal> itemQuantities = new HashMap<>();
+        for (Map<String, Object> item : items)
+        {
+            String productId = asString(item.get("productId"));
+            BigDecimal factor = stockUnitFactor(item, products.get(productId));
+            BigDecimal quantity = decimal(item.get("qty")).multiply(factor).setScale(6, RoundingMode.HALF_UP);
+            if (quantity.compareTo(BigDecimal.ZERO) <= 0)
+            {
+                return AjaxResult.error("采购明细换算数量无效");
+            }
+            itemQuantities.put(asString(item.get("_id")), quantity);
+            increments.merge(productId, quantity, BigDecimal::add);
+        }
+
+        long now = System.currentTimeMillis();
+        for (String productId : sortedProductIds)
+        {
+            Map<String, Object> product = products.get(productId);
+            BigDecimal stock = decimal(product.get("stock")).add(increments.get(productId));
+            product.put("stock", stock.stripTrailingZeros());
+            product.put("stockVersion", asLong(product.get("stockVersion")) + 1);
+            writeExistingRecord("products", productId, product, now);
+        }
+        for (Map<String, Object> item : items)
+        {
+            String itemId = asString(item.get("_id"));
+            item.put("stockInQty", itemQuantities.get(itemId).stripTrailingZeros());
+            String stockUnit = asString(products.get(asString(item.get("productId"))).get("unitSmall"));
+            item.put("stockInUnit", StringUtils.isEmpty(stockUnit) ? "个" : stockUnit);
+            item.put("stockInTime", now);
+            writeExistingRecord("purchaseItems", itemId, item, now);
+        }
+        Set<String> sourceItemIds = new HashSet<>();
+        Set<String> sourceRequestIds = new HashSet<>();
+        for (Map<String, Object> item : items)
+        {
+            sourceItemIds.addAll(sourceIds(item, "sourcePurchaseRequestItemIds", "sourcePurchaseRequestItemId"));
+            sourceRequestIds.addAll(sourceIds(item, "sourcePurchaseRequestIds", "sourcePurchaseRequestId"));
+        }
+        List<Map<String, Object>> requestItems = loadTableForUpdate("purchaseRequestItems");
+        for (Map<String, Object> requestItem : requestItems)
+        {
+            if (!sourceItemIds.contains(asString(requestItem.get("_id")))) continue;
+            requestItem.put("status", "converted");
+            requestItem.put("purchaseOrderId", orderId);
+            writeExistingRecord("purchaseRequestItems", asString(requestItem.get("_id")), requestItem, now);
+            sourceRequestIds.add(asString(requestItem.get("requestId")));
+        }
+        for (String requestId : sourceRequestIds)
+        {
+            if (StringUtils.isEmpty(requestId)) continue;
+            Map<String, Object> request = getRecordForUpdate("purchaseRequests", requestId);
+            if (request == null || "closed".equals(asString(request.get("status"))) ||
+                    "withdrawn".equals(asString(request.get("status")))) continue;
+            int total = 0;
+            int converted = 0;
+            int purchased = 0;
+            int pre = 0;
+            for (Map<String, Object> requestItem : requestItems)
+            {
+                if (!requestId.equals(asString(requestItem.get("requestId")))) continue;
+                total++;
+                String status = asString(requestItem.get("status"));
+                if ("converted".equals(status)) converted++;
+                if ("purchased".equals(status)) purchased++;
+                if ("pre".equals(status)) pre++;
+            }
+            if (total == 0) continue;
+            String status = converted == total ? "converted" :
+                    (converted > 0 || purchased > 0 ? "purchased" : (pre > 0 ? "pre" : "pending"));
+            request.put("status", status);
+            writeExistingRecord("purchaseRequests", requestId, request, now);
+        }
+        order.put("status", "approved");
+        order.put("stockInTime", now);
+        order.put("stockInBy", asString(body.get("stockInBy")));
+        writeExistingRecord("purchaseOrders", orderId, order, now);
+        return AjaxResult.success(order);
     }
 
     @PostMapping("/auth/login")
@@ -641,6 +791,24 @@ public class SqmsRecordController implements InitializingBean
             id = table + "_" + Long.toString(now, 36) + Integer.toString(Math.abs(body.hashCode()), 36);
             body.put("_id", id);
         }
+        if ("purchaseOrders".equals(table) || "purchaseItems".equals(table))
+        {
+            Map<String, Object> existing = getRecord(table, id);
+            String parentId = "purchaseItems".equals(table) ? asString(body.get("purchaseOrderId")) : id;
+            if ("purchaseItems".equals(table) && existing != null)
+            {
+                parentId = asString(existing.get("purchaseOrderId"));
+            }
+            Map<String, Object> parent = "purchaseItems".equals(table) && !StringUtils.isEmpty(parentId)
+                    ? getRecordForUpdate("purchaseOrders", parentId) : null;
+            existing = getRecordForUpdate(table, id);
+            if ((existing != null && asLong(existing.get("stockInTime")) > 0) ||
+                    (parent != null && asLong(parent.get("stockInTime")) > 0))
+            {
+                if (existing != null) return existing;
+                throw new IllegalArgumentException("已入库采购单不能添加明细");
+            }
+        }
         if ("employees".equals(table) || "customers".equals(table))
         {
             Map<String, Object> existing = getRecord(table, id);
@@ -684,6 +852,38 @@ public class SqmsRecordController implements InitializingBean
                 }
             }
         }
+        if ("products".equals(table))
+        {
+            Map<String, Object> existing = getRecordForUpdate(table, id);
+            if (existing == null)
+            {
+                body.putIfAbsent("stock", 0);
+                if (decimal(body.get("stock")).compareTo(BigDecimal.ZERO) < 0)
+                {
+                    throw new IllegalArgumentException("库存不能小于零");
+                }
+                body.put("stockVersion", 0L);
+            }
+            else
+            {
+                long version = asLong(existing.get("stockVersion"));
+                boolean stockChanged = body.containsKey("stock") &&
+                        decimal(body.get("stock")).compareTo(decimal(existing.get("stock"))) != 0;
+                if (stockChanged && body.containsKey("stockVersion") && asLong(body.get("stockVersion")) == version)
+                {
+                    if (decimal(body.get("stock")).compareTo(BigDecimal.ZERO) < 0)
+                    {
+                        throw new IllegalArgumentException("库存不能小于零");
+                    }
+                    body.put("stockVersion", version + 1);
+                }
+                else
+                {
+                    body.put("stock", existing.getOrDefault("stock", 0));
+                    body.put("stockVersion", version);
+                }
+            }
+        }
         body.putIfAbsent("createTime", now);
         body.put("updateTime", now);
 
@@ -698,6 +898,66 @@ public class SqmsRecordController implements InitializingBean
         List<Map<String, Object>> rows = jdbcTemplate.query("SELECT record_json FROM sqms_record WHERE table_name = ? AND record_id = ?",
                 (rs, rowNum) -> parseRecord(rs.getString("record_json")), table, id);
         return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private Map<String, Object> getRecordForUpdate(String table, String id)
+    {
+        List<Map<String, Object>> rows = jdbcTemplate.query(
+                "SELECT record_json FROM sqms_record WHERE table_name = ? AND record_id = ? FOR UPDATE",
+                (rs, rowNum) -> parseRecord(rs.getString("record_json")), table, id);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private List<Map<String, Object>> loadTableForUpdate(String table)
+    {
+        return jdbcTemplate.query("SELECT record_json FROM sqms_record WHERE table_name = ? FOR UPDATE",
+                (rs, rowNum) -> parseRecord(rs.getString("record_json")), table);
+    }
+
+    private void writeExistingRecord(String table, String id, Map<String, Object> record, long now)
+    {
+        record.put("updateTime", now);
+        int updated = jdbcTemplate.update(
+                "UPDATE sqms_record SET record_json = ?, update_time = CURRENT_TIMESTAMP WHERE table_name = ? AND record_id = ?",
+                JSON.toJSONString(record), table, id);
+        if (updated != 1)
+        {
+            throw new IllegalStateException("入库时记录发生变化，请重试");
+        }
+    }
+
+    private BigDecimal stockUnitFactor(Map<String, Object> item, Map<String, Object> product)
+    {
+        BigDecimal snapshot = decimal(item.get("unitFactor"));
+        if (snapshot.compareTo(BigDecimal.ZERO) > 0)
+        {
+            return snapshot;
+        }
+        BigDecimal medium = decimal(product.get("mediumToSmall"));
+        BigDecimal large = decimal(product.get("largeToMedium"));
+        if (medium.compareTo(BigDecimal.ZERO) <= 0) medium = BigDecimal.ONE;
+        if (large.compareTo(BigDecimal.ZERO) <= 0) large = BigDecimal.ONE;
+        String unit = asString(item.get("unit"));
+        if (unit.equals(asString(product.get("unitLarge")))) return medium.multiply(large);
+        if (unit.equals(asString(product.get("unitMedium")))) return medium;
+        return BigDecimal.ONE;
+    }
+
+    private Set<String> sourceIds(Map<String, Object> record, String arrayField, String singleField)
+    {
+        Set<String> ids = new HashSet<>();
+        Object values = record.get(arrayField);
+        if (values instanceof List)
+        {
+            for (Object value : (List<?>) values)
+            {
+                String id = asString(value);
+                if (!StringUtils.isEmpty(id)) ids.add(id);
+            }
+        }
+        String single = asString(record.get(singleField));
+        if (!StringUtils.isEmpty(single)) ids.add(single);
+        return ids;
     }
 
     private List<Map<String, Object>> loadTable(String table)
@@ -809,6 +1069,20 @@ public class SqmsRecordController implements InitializingBean
 
     private int deleteRecordById(String table, String id)
     {
+        if ("purchaseOrders".equals(table) || "purchaseItems".equals(table))
+        {
+            Map<String, Object> record = getRecord(table, id);
+            if (record != null)
+            {
+                if ("purchaseItems".equals(table))
+                {
+                    Map<String, Object> parent = getRecordForUpdate("purchaseOrders", asString(record.get("purchaseOrderId")));
+                    if (parent != null && asLong(parent.get("stockInTime")) > 0) return 0;
+                }
+                record = getRecordForUpdate(table, id);
+                if (record != null && asLong(record.get("stockInTime")) > 0) return 0;
+            }
+        }
         return jdbcTemplate.update("DELETE FROM sqms_record WHERE table_name = ? AND record_id = ?", table, id);
     }
 
@@ -850,6 +1124,30 @@ public class SqmsRecordController implements InitializingBean
     private String asString(Object value)
     {
         return value == null ? "" : String.valueOf(value);
+    }
+
+    private long asLong(Object value)
+    {
+        try
+        {
+            return Long.parseLong(asString(value));
+        }
+        catch (Exception e)
+        {
+            return 0L;
+        }
+    }
+
+    private BigDecimal decimal(Object value)
+    {
+        try
+        {
+            return new BigDecimal(asString(value));
+        }
+        catch (Exception e)
+        {
+            return BigDecimal.ZERO;
+        }
     }
 
     private Map<String, Object> sanitizeUser(Map<String, Object> user)
