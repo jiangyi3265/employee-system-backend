@@ -938,6 +938,7 @@ public class SqmsRecordController implements InitializingBean
         if (medium.compareTo(BigDecimal.ZERO) <= 0) medium = BigDecimal.ONE;
         if (large.compareTo(BigDecimal.ZERO) <= 0) large = BigDecimal.ONE;
         String unit = asString(item.get("unit"));
+        if (StringUtils.isEmpty(unit)) return BigDecimal.ONE;
         if (unit.equals(asString(product.get("unitLarge")))) return medium.multiply(large);
         if (unit.equals(asString(product.get("unitMedium")))) return medium;
         return BigDecimal.ONE;

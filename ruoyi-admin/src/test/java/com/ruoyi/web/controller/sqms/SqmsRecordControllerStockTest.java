@@ -114,4 +114,16 @@ public class SqmsRecordControllerStockTest
         assertEquals(50, record("products", "p").getIntValue("stock"));
         assertEquals(0, record("products", "p").getLongValue("stockVersion"));
     }
+
+    @Test
+    public void missingLegacyUnitDoesNotAssumeLargeUnit()
+    {
+        insert("products", "p", row("stock", 5, "mediumToSmall", 12, "largeToMedium", 12));
+        insert("purchaseOrders", "o", row("status", "purchased"));
+        insert("purchaseItems", "i", row("purchaseOrderId", "o", "productId", "p", "qty", 2));
+
+        AjaxResult result = controller.stockInPurchase(row("orderId", "o"));
+        assertEquals(200, result.get("code"));
+        assertEquals(7, record("products", "p").getIntValue("stock"));
+    }
 }

@@ -74,7 +74,7 @@ jobs:
           PATCH_DIR="$DEPLOY_DIR/patches/$GITHUB_SHA"
           PATCH_ARCHIVE="$(mktemp)"
           CHANGED_FILES="$(git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" || true)"
-          if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -vE '^(\.github/workflows/deploy\.yml|ruoyi-admin/src/main/java/com/ruoyi/web/controller/sqms/SqmsRecordController\.java|ruoyi-admin/src/main/resources/application\.yml)$' >/dev/null; then
+          if [ -n "$CHANGED_FILES" ] && ! printf '%s\n' "$CHANGED_FILES" | grep -vE '^(\.github/workflows/deploy\.yml|ruoyi-admin/src/main/java/com/ruoyi/web/controller/sqms/SqmsRecordController\.java|ruoyi-admin/src/test/java/com/ruoyi/web/controller/sqms/SqmsRecordControllerStockTest\.java|ruoyi-admin/src/main/resources/application\.yml)$' >/dev/null; then
             REUSE_EXISTING_JAR=1
           fi
           PATCH_CLASS_FILES=("$PATCH_CLASS_ROOT/$PATCH_CLASS_REL_DIR"/SqmsRecordController*.class)
